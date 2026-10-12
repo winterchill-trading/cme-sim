@@ -9,6 +9,7 @@
   cme-sim.wire
   equities-core
   exchange-core
-  exchange-core-engine)
+  exchange-core-engine
+  yojson)
  (preprocess
   (pps ppx_jane)))

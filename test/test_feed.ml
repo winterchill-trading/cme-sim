@@ -162,3 +162,27 @@ let%expect_test "a late subscriber's snapshot matches the book" =
         (settl_price_type 3) (entry_type 6)))))
     |}]
 ;;
+
+let%expect_test "JSON rendering of the same packets" =
+  let v = Venue.create () in
+  let feed = Feed.create v in
+  Venue.new_order v ~account:alice (order Buy 2 ~price:"6699.75" ~cl_ord_id:"a");
+  Venue.new_order v ~account:bob (order Sell 1 ~price:"6699.75" ~cl_ord_id:"b");
+  let _unsubscribe =
+    Feed.subscribe feed ~now (fun p ->
+      match p.messages with
+      | [ Instrument_definition_future { security_id = 1001; _ } ]
+      | [ Incremental_book _ ]
+      | [ Trade_summary _ ] ->
+        List.iter (Json_feed.of_packet p) ~f:(fun j ->
+          print_endline (Yojson.Safe.to_string j))
+      | _ -> ())
+  in
+  List.iter (Venue.drain v) ~f:(Feed.on_output feed ~now);
+  [%expect
+    {|
+    {"seq":0,"time":1760000000000000000,"type":"definition","symbol":"ESZ6","security_id":1001,"security_group":"ES","exchange":"XCME","maturity":"202612","tick":"0.25","multiplier":50,"tick_value":"12.5","unit_of_measure":"IPNT","reference_price":"6699.75","low_limit":"6231","high_limit":"7169","status":"open"}
+    {"seq":1,"time":1760000000000000000,"type":"book","transact_time":1760000000000000000,"entries":[{"symbol":"ESZ6","side":"bid","level":1,"action":"new","price":"6699.75","size":1,"orders":1,"rpt_seq":1}]}
+    {"seq":2,"time":1760000000000000000,"type":"trade","transact_time":0,"entries":[{"symbol":"ESZ6","price":"6699.75","size":1,"aggressor":"sell","orders":2,"trade_id":1,"rpt_seq":2}]}
+    |}]
+;;
