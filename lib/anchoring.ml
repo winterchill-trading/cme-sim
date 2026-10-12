@@ -137,6 +137,7 @@ module Stats = struct
     { pulls : int
     ; waits : int
     ; restarts : int
+    ; clamped : int
     ; last_target : Price.t option
     }
   [@@deriving sexp_of]
@@ -153,6 +154,7 @@ let create ?(half_life = Time_ns.Span.of_sec 1.) ?log venue products =
   List.iter products ~f:(fun ((p : Products.t), (reference : Reference.t), sim) ->
     let security_id = p.security_id in
     let sim_symbol = Products.engine_symbol p in
+    let instrument = Products.instrument p in
     Hashtbl.set
       anchors
       ~key:security_id
@@ -166,6 +168,9 @@ let create ?(half_life = Time_ns.Span.of_sec 1.) ?log venue products =
            ~may_engage:(fun () -> Venue.Phase.equal (Venue.phase venue ~security_id) Open)
            ~last_trade:(fun () -> Some (Venue.last_price venue ~security_id))
            ~step_clock:false
+           ~clamp:(fun px ->
+             let lower, upper = Venue.price_limits venue ~security_id in
+             Price_anchor.Clamp.within_bands instrument ~lower ~upper px)
            ~path:reference.path
            ?log
            ~market_sim:sim
@@ -191,6 +196,7 @@ let stats t p =
     { Stats.pulls = s.marks_set
     ; waits = s.waits
     ; restarts = s.resumes
+    ; clamped = s.clamped
     ; last_target = Anchor.last_set anchor
     })
 ;;

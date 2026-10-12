@@ -5,7 +5,10 @@
     book's only liquidity. Their random walk becomes mean-reverting around a reference
     price: a {!Price_anchor.Path} pulled on the venue's clock, and while the product is
     {!Venue.Phase.Open} each step pulls the walk towards it through
-    [Market_sim.set_reference ~half_life]; the mark follows on the next noise tick.
+    [Market_sim.set_reference ~half_life]; the mark follows on the next noise tick. The
+    target is kept 30 bps inside the product's daily price limits
+    ({!Price_anchor.Clamp.within_bands}), so the anchor alone never drives the product
+    into a limit halt.
 
     In the other phases (pre-open, a limit halt, the maintenance window) the venue owns
     the price: the anchor hands the symbol back to the free walk (which does not tick
@@ -84,8 +87,10 @@ module Stats : sig
     { pulls : int (** reference changes passed to the walk ([Anchor] [marks_set]) *)
     ; waits : int (** steps spent outside the open phase *)
     ; restarts : int (** reopenings that restarted the walk from the venue price *)
+    ; clamped : int (** pulls whose target the daily price limits moved *)
     ; last_target : Price.t option
-    (** the last reference passed to the walk; [None] from a reopening until the next pull *)
+    (** the last reference passed to the walk, after the clamp; [None] from a reopening
+        until the next pull *)
     }
   [@@deriving sexp_of]
 end

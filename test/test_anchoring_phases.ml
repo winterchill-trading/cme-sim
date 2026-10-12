@@ -152,3 +152,27 @@ let%expect_test "price limits keep coming from the simulator's own trades" =
      (low 6323.5) (high 7275) (limits_from_last_trade true))
     |}]
 ;;
+
+let%expect_test "a reference beyond the daily limits is held 30 bps inside them" =
+  let h = create ~anchor:"8000" () in
+  run h ~secs:10.;
+  let low, high = Venue.price_limits h.venue ~security_id in
+  let stats = Option.value_exn (Anchoring.stats h.anchoring es) in
+  print_s
+    [%message
+      ""
+        (low : Price.t)
+        (high : Price.t)
+        ~target:(Anchoring.target h.anchoring es : Price.t option)
+        ~last_target:(stats.last_target : Price.t option)
+        ~clamped:(stats.clamped : int)
+        ~mark:
+          (Exchange_core_engine.Exchange.mark (Venue.exchange h.venue) symbol
+           : Price.t option)
+        ~phase:(Venue.phase h.venue ~security_id : Venue.Phase.t)];
+  [%expect
+    {|
+    ((low 6231) (high 7169) (target (8000)) (last_target (7147.5)) (clamped 1)
+     (mark (7147)) (phase Open))
+    |}]
+;;

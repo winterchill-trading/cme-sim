@@ -378,6 +378,7 @@ let anchors_json t =
            ; "pulls", `Int s.pulls
            ; "waits", `Int s.waits
            ; "restarts", `Int s.restarts
+           ; "clamped", `Int s.clamped
            ])))
 ;;
 
