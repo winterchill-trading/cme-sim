@@ -962,15 +962,136 @@ let product_orders t product =
   |> List.sort ~compare:(fun a b -> Int.compare a.arrival b.arrival)
 ;;
 
+type participant =
+  | Queued of order
+  | Resting of Order_book.Resting_order.t
+
+(* The opening (or reopening) auction: orders entered in pre-open and the orders resting
+   in the book are uncrossed at one price with equities-core [Auction]. The auction trades
+   are reported directly (they do not go through the engine's matching); resting orders
+   that traded are taken out of the engine and their remainders placed again. *)
+let uncross t product ~kind =
+  let symbol = Products.engine_symbol product in
+  let security_id = product.Products.security_id in
+  let resting =
+    Option.value_map (Exchange.book t.exchange symbol) ~default:[] ~f:Order_book.orders
+    |> List.sort ~compare:(fun (a : Order_book.Resting_order.t) b ->
+      Comparable.lexicographic
+        [ (fun (a : Order_book.Resting_order.t) b -> Int.compare a.timestamp b.timestamp)
+        ; (fun a b -> Order_id.compare a.oid b.oid)
+        ]
+        a
+        b)
+  in
+  let queued = List.filter (product_orders t product) ~f:(fun o -> o.queued) in
+  let participants =
+    List.map resting ~f:(fun r -> Resting r) @ List.map queued ~f:(fun o -> Queued o)
+    |> Array.of_list
+  in
+  let auction_orders =
+    Array.to_list participants
+    |> List.mapi ~f:(fun id p : Equities_core.Auction.Order.t ->
+      match p with
+      | Resting r ->
+        { id; side = r.side; qty = contracts r.remaining; kind = Book; limit = Some r.px }
+      | Queued o ->
+        { id
+        ; side = Order_types.Side.to_core (order_side o.side)
+        ; qty = leaves o
+        ; kind = Loo
+        ; limit = Some o.price
+        })
+  in
+  match
+    Equities_core.Auction.uncross
+      ~kind
+      ~reference:(last_price t ~security_id)
+      auction_orders
+  with
+  | None -> ()
+  | Some (result, fills) ->
+    let md_trade_entry_id = next_trade_entry_id t in
+    let replace = Queue.create () in
+    let orders =
+      List.map fills ~f:(fun (fill : Equities_core.Auction.Fill.t) ->
+        match participants.(fill.id) with
+        | Queued o ->
+          o.cum_qty <- o.cum_qty + fill.qty;
+          report_trade
+            t
+            o
+            ~px:result.price
+            ~qty:fill.qty
+            ~aggressor:false
+            ~md_trade_entry_id;
+          if leaves o = 0 then forget t o;
+          o.order_id, fill.qty
+        | Resting r ->
+          ignore
+            (Exchange.cancel t.exchange r.owner ~symbol r.oid
+             : Exchange_core.Cancel_status.t);
+          (match venue_order t r.oid with
+           | Some o ->
+             Hashtbl.remove t.by_engine r.oid;
+             o.engine_oid <- None;
+             o.cum_qty <- o.cum_qty + fill.qty;
+             report_trade
+               t
+               o
+               ~px:result.price
+               ~qty:fill.qty
+               ~aggressor:false
+               ~md_trade_entry_id;
+             if leaves o = 0 then forget t o else Queue.enqueue replace o;
+             o.order_id, fill.qty
+           | None ->
+             let left = contracts r.remaining - fill.qty in
+             if left > 0
+             then
+               ignore
+                 (Exchange.place
+                    t.exchange
+                    r.owner
+                    (Exchange_core.Order_request.limit
+                       symbol
+                       r.side
+                       ~px:r.px
+                       ~size:(Size.of_int left))
+                  : Exchange_core.Order_status.t);
+             Order_id.to_int_exn r.oid, fill.qty))
+    in
+    Hashtbl.set t.last_trades ~key:security_id ~data:result.price;
+    emit
+      t
+      (Trade
+         { security_id
+         ; px = result.price
+         ; size = result.matched
+         ; aggressor = None
+         ; md_trade_entry_id
+         ; orders
+         ; time = t.now
+         });
+    Queue.iter replace ~f:(fun o -> o.queued <- true)
+;;
+
 let open_market t product ~from =
-  match (from : Phase.t) with
-  | Pre_open ->
+  let release () =
     List.iter (product_orders t product) ~f:(fun o ->
       if o.queued
       then (
         o.queued <- false;
-        execute t o))
-  | Open | Halted | Closed -> ()
+        execute t o));
+    process_events t
+  in
+  match (from : Phase.t) with
+  | Pre_open ->
+    uncross t product ~kind:Opening;
+    release ()
+  | Halted ->
+    uncross t product ~kind:Halt_reopening;
+    release ()
+  | Open | Closed -> ()
 ;;
 
 let set_phase t ~security_id next =
