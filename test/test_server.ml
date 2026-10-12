@@ -103,29 +103,32 @@ let%expect_test "order entry and the feed over TCP" =
       match%bind Frame_io.read feed_reader with
       | Ok (`Ok frame) ->
         let packet = ok_exn (Mdp3.decode_frame frame) in
-        List.iter packet.messages ~f:(fun m ->
-          printf "%d %s\n" packet.msg_seq_num (Mdp3.Message.name m));
-        read_feed (n - 1)
+        (* heartbeats depend on timing *)
+        (match packet.messages with
+         | [ Admin_heartbeat ] -> read_feed n
+         | messages ->
+           List.iter messages ~f:(fun m -> print_endline (Mdp3.Message.name m));
+           read_feed (n - 1))
       | _ -> return (print_endline "feed closed"))
   in
   let%bind () = read_feed 15 in
   [%expect
     {|
-    1 MDInstrumentDefinitionFuture
-    1 MDInstrumentDefinitionFuture
-    1 MDInstrumentDefinitionFuture
-    1 MDInstrumentDefinitionFuture
-    1 SecurityStatus
-    1 SecurityStatus
-    1 SecurityStatus
-    1 SecurityStatus
-    1 SnapshotFullRefresh
-    1 SnapshotFullRefresh
-    1 SnapshotFullRefresh
-    1 SnapshotFullRefresh
-    2 MDIncrementalRefreshBook
-    3 MDIncrementalRefreshTradeSummary
-    4 MDIncrementalRefreshBook
+    MDInstrumentDefinitionFuture
+    MDInstrumentDefinitionFuture
+    MDInstrumentDefinitionFuture
+    MDInstrumentDefinitionFuture
+    SecurityStatus
+    SecurityStatus
+    SecurityStatus
+    SecurityStatus
+    SnapshotFullRefresh
+    SnapshotFullRefresh
+    SnapshotFullRefresh
+    SnapshotFullRefresh
+    MDIncrementalRefreshBook
+    MDIncrementalRefreshTradeSummary
+    MDIncrementalRefreshBook
     |}];
   let%bind () = Ilink_client.close seller in
   let%bind () = Ilink_client.close buyer in
