@@ -52,6 +52,7 @@ type t =
   ; mutable state : state
   ; mutable account : Account.t option
   ; mutable entry : Entry.t
+  ; mutable previous_uuid : int
   ; mutable keep_alive : Time_ns.Span.t
   ; mutable last_received : Time_ns.t
   ; mutable last_sent : Time_ns.t
@@ -64,6 +65,7 @@ let create registry ~now =
   ; state = Connected
   ; account = None
   ; entry = Entry.create ()
+  ; previous_uuid = 0
   ; keep_alive = Time_ns.Span.of_sec 30.
   ; last_received = now
   ; last_sent = now
@@ -157,6 +159,7 @@ let on_negotiate t ~now (n : Ilink3.Negotiate.t) =
       entry.next_inbound <- 1;
       Hashtbl.clear entry.store);
     t.entry <- entry;
+    t.previous_uuid <- previous_uuid;
     t.account <- Some account;
     t.state <- Negotiated;
     [ send
@@ -198,7 +201,7 @@ let on_establish t ~now (e : Ilink3.Establish.t) =
            ; request_timestamp = e.request_timestamp
            ; next_seq_no = t.entry.next_outbound
            ; previous_seq_no = t.entry.next_outbound - 1
-           ; previous_uuid = t.entry.uuid
+           ; previous_uuid = t.previous_uuid
            ; keep_alive_interval = Time_ns.Span.to_int_ms t.keep_alive
            ; secret_key_secure_id_expiration = None
            })
