@@ -3,6 +3,12 @@
  (inline_tests
   (flags
    (:standard -source-tree-root .)))
- (libraries core cme-sim.wire exchange-core)
+ (libraries
+  core
+  cme-sim
+  cme-sim.wire
+  equities-core
+  exchange-core
+  exchange-core-engine)
  (preprocess
   (pps ppx_jane)))
