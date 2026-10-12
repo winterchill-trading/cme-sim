@@ -437,12 +437,452 @@ module Instrument_definition_future = struct
   ;;
 end
 
+module Entry_type = struct
+  type t =
+    | Bid
+    | Offer
+    | Implied_bid
+    | Implied_offer
+    | Book_reset
+  [@@deriving sexp, compare, equal, enumerate]
+
+  let to_char = function
+    | Bid -> '0'
+    | Offer -> '1'
+    | Implied_bid -> 'E'
+    | Implied_offer -> 'F'
+    | Book_reset -> 'J'
+  ;;
+
+  let of_char c = List.find all ~f:(fun t -> Char.equal (to_char t) c)
+end
+
+module Aggressor_side = struct
+  type t =
+    | No_aggressor
+    | Buy
+    | Sell
+  [@@deriving sexp, compare, equal, enumerate]
+
+  let to_int = function
+    | No_aggressor -> 0
+    | Buy -> 1
+    | Sell -> 2
+  ;;
+
+  let of_int = function
+    | 0 -> No_aggressor
+    | 1 -> Buy
+    | 2 -> Sell
+    | v -> fail "invalid AggressorSide %d" v
+  ;;
+end
+
+let get_update_action b ~pos =
+  let v = Sbe.get_u8 b ~pos in
+  match Update_action.of_int v with
+  | Some a -> a
+  | None -> fail "invalid MDUpdateAction %d" v
+;;
+
+let set_update_action b ~pos a = Sbe.set_u8 b ~pos (Update_action.to_int a)
+
+module Incremental_book = struct
+  module Entry = struct
+    type t =
+      { px : Price.t option
+      ; size : int option
+      ; security_id : int
+      ; rpt_seq : int
+      ; number_of_orders : int option
+      ; price_level : int
+      ; update_action : Update_action.t
+      ; entry_type : Entry_type.t
+      }
+    [@@deriving sexp, compare, equal]
+
+    let block_length = 32
+
+    let write b ~pos t =
+      Sbe.set_price_opt b ~pos t.px;
+      Sbe.set_i32_opt b ~pos:(pos + 8) t.size;
+      Sbe.set_i32 b ~pos:(pos + 12) t.security_id;
+      Sbe.set_u32 b ~pos:(pos + 16) t.rpt_seq;
+      Sbe.set_i32_opt b ~pos:(pos + 20) t.number_of_orders;
+      Sbe.set_u8 b ~pos:(pos + 24) t.price_level;
+      set_update_action b ~pos:(pos + 25) t.update_action;
+      Sbe.set_char b ~pos:(pos + 26) (Entry_type.to_char t.entry_type);
+      (* TradeableSize: implied quantities are out of scope *)
+      Sbe.set_i32_opt b ~pos:(pos + 27) None
+    ;;
+
+    let read b ~pos =
+      { px = Sbe.get_price_opt b ~pos
+      ; size = Sbe.get_i32_opt b ~pos:(pos + 8)
+      ; security_id = Sbe.get_i32 b ~pos:(pos + 12)
+      ; rpt_seq = Sbe.get_u32 b ~pos:(pos + 16)
+      ; number_of_orders = Sbe.get_i32_opt b ~pos:(pos + 20)
+      ; price_level = Sbe.get_u8 b ~pos:(pos + 24)
+      ; update_action = get_update_action b ~pos:(pos + 25)
+      ; entry_type =
+          (let c = Sbe.get_char b ~pos:(pos + 26) in
+           match Entry_type.of_char c with
+           | Some t -> t
+           | None -> fail "invalid book MDEntryType %C" c)
+      }
+    ;;
+  end
+
+  type t =
+    { transact_time : int
+    ; match_event_indicator : Match_event.t
+    ; entries : Entry.t list
+    }
+  [@@deriving sexp, compare, equal]
+
+  let template_id = 46
+  let block_length = 11
+  let order_entry_length = 24
+
+  (* NoOrderIDEntries is always empty: market by order is out of scope. *)
+  let groups_size t =
+    group_size ~block_length:Entry.block_length t.entries
+    + group_size ~eight_byte:true ~block_length:order_entry_length []
+  ;;
+
+  let write b ~base t =
+    Sbe.set_u64 b ~pos:base t.transact_time;
+    Sbe.set_u8 b ~pos:(base + 8) t.match_event_indicator;
+    let pos =
+      write_group
+        b
+        ~pos:(base + block_length)
+        ~block_length:Entry.block_length
+        t.entries
+        ~f:(fun pos e -> Entry.write b ~pos e)
+    in
+    ignore
+      (write_group
+         ~eight_byte:true
+         b
+         ~pos
+         ~block_length:order_entry_length
+         []
+         ~f:(fun _ () -> ())
+       : int)
+  ;;
+
+  let read b ~base ~block_length =
+    let entries, _ =
+      read_group b ~pos:(base + block_length) ~f:(fun pos -> Entry.read b ~pos)
+    in
+    { transact_time = Sbe.get_u64 b ~pos:base
+    ; match_event_indicator = Sbe.get_u8 b ~pos:(base + 8)
+    ; entries
+    }
+  ;;
+end
+
+module Trade_summary = struct
+  module Entry = struct
+    type t =
+      { px : Price.t
+      ; size : int
+      ; security_id : int
+      ; rpt_seq : int
+      ; number_of_orders : int
+      ; aggressor_side : Aggressor_side.t option
+      ; update_action : Update_action.t
+      ; md_trade_entry_id : int option
+      }
+    [@@deriving sexp, compare, equal]
+
+    let block_length = 32
+
+    let write b ~pos t =
+      Sbe.set_price b ~pos t.px;
+      Sbe.set_i32 b ~pos:(pos + 8) t.size;
+      Sbe.set_i32 b ~pos:(pos + 12) t.security_id;
+      Sbe.set_u32 b ~pos:(pos + 16) t.rpt_seq;
+      Sbe.set_i32 b ~pos:(pos + 20) t.number_of_orders;
+      Sbe.set_u8_opt
+        b
+        ~pos:(pos + 24)
+        (Option.map t.aggressor_side ~f:Aggressor_side.to_int);
+      set_update_action b ~pos:(pos + 25) t.update_action;
+      Sbe.set_u32_opt b ~pos:(pos + 26) t.md_trade_entry_id
+    ;;
+
+    let read b ~pos =
+      { px = Sbe.get_price b ~pos
+      ; size = Sbe.get_i32 b ~pos:(pos + 8)
+      ; security_id = Sbe.get_i32 b ~pos:(pos + 12)
+      ; rpt_seq = Sbe.get_u32 b ~pos:(pos + 16)
+      ; number_of_orders = Sbe.get_i32 b ~pos:(pos + 20)
+      ; aggressor_side =
+          Option.map (Sbe.get_u8_opt b ~pos:(pos + 24)) ~f:Aggressor_side.of_int
+      ; update_action = get_update_action b ~pos:(pos + 25)
+      ; md_trade_entry_id = Sbe.get_u32_opt b ~pos:(pos + 26)
+      }
+    ;;
+  end
+
+  module Order = struct
+    type t =
+      { order_id : int
+      ; last_qty : int
+      }
+    [@@deriving sexp, compare, equal]
+
+    let block_length = 16
+  end
+
+  type t =
+    { transact_time : int
+    ; match_event_indicator : Match_event.t
+    ; entries : Entry.t list
+    ; orders : Order.t list
+    }
+  [@@deriving sexp, compare, equal]
+
+  let template_id = 48
+  let block_length = 11
+
+  let groups_size t =
+    group_size ~block_length:Entry.block_length t.entries
+    + group_size ~eight_byte:true ~block_length:Order.block_length t.orders
+  ;;
+
+  let write b ~base t =
+    Sbe.set_u64 b ~pos:base t.transact_time;
+    Sbe.set_u8 b ~pos:(base + 8) t.match_event_indicator;
+    let pos =
+      write_group
+        b
+        ~pos:(base + block_length)
+        ~block_length:Entry.block_length
+        t.entries
+        ~f:(fun pos e -> Entry.write b ~pos e)
+    in
+    ignore
+      (write_group
+         ~eight_byte:true
+         b
+         ~pos
+         ~block_length:Order.block_length
+         t.orders
+         ~f:(fun pos (o : Order.t) ->
+           Sbe.set_u64 b ~pos o.order_id;
+           Sbe.set_i32 b ~pos:(pos + 8) o.last_qty)
+       : int)
+  ;;
+
+  let read b ~base ~block_length =
+    let entries, pos =
+      read_group b ~pos:(base + block_length) ~f:(fun pos -> Entry.read b ~pos)
+    in
+    let orders, _ =
+      read_group ~eight_byte:true b ~pos ~f:(fun pos : Order.t ->
+        { order_id = Sbe.get_u64 b ~pos; last_qty = Sbe.get_i32 b ~pos:(pos + 8) })
+    in
+    { transact_time = Sbe.get_u64 b ~pos:base
+    ; match_event_indicator = Sbe.get_u8 b ~pos:(base + 8)
+    ; entries
+    ; orders
+    }
+  ;;
+end
+
+module Daily_statistics = struct
+  module Entry = struct
+    type t =
+      { px : Price.t option
+      ; size : int option
+      ; security_id : int
+      ; rpt_seq : int
+      ; trading_reference_date : int option
+      ; settl_price_type : int
+      ; update_action : Update_action.t
+      ; entry_type : char
+      }
+    [@@deriving sexp, compare, equal]
+
+    let block_length = 32
+
+    let write b ~pos t =
+      Sbe.set_price_opt b ~pos t.px;
+      Sbe.set_i32_opt b ~pos:(pos + 8) t.size;
+      Sbe.set_i32 b ~pos:(pos + 12) t.security_id;
+      Sbe.set_u32 b ~pos:(pos + 16) t.rpt_seq;
+      Sbe.set_u16_opt b ~pos:(pos + 20) t.trading_reference_date;
+      Sbe.set_u8 b ~pos:(pos + 22) t.settl_price_type;
+      set_update_action b ~pos:(pos + 23) t.update_action;
+      Sbe.set_char b ~pos:(pos + 24) t.entry_type
+    ;;
+
+    let read b ~pos =
+      { px = Sbe.get_price_opt b ~pos
+      ; size = Sbe.get_i32_opt b ~pos:(pos + 8)
+      ; security_id = Sbe.get_i32 b ~pos:(pos + 12)
+      ; rpt_seq = Sbe.get_u32 b ~pos:(pos + 16)
+      ; trading_reference_date = Sbe.get_u16_opt b ~pos:(pos + 20)
+      ; settl_price_type = Sbe.get_u8 b ~pos:(pos + 22)
+      ; update_action = get_update_action b ~pos:(pos + 23)
+      ; entry_type = Sbe.get_char b ~pos:(pos + 24)
+      }
+    ;;
+  end
+
+  type t =
+    { transact_time : int
+    ; match_event_indicator : Match_event.t
+    ; entries : Entry.t list
+    }
+  [@@deriving sexp, compare, equal]
+
+  let template_id = 49
+  let block_length = 11
+  let groups_size t = group_size ~block_length:Entry.block_length t.entries
+
+  let write b ~base t =
+    Sbe.set_u64 b ~pos:base t.transact_time;
+    Sbe.set_u8 b ~pos:(base + 8) t.match_event_indicator;
+    ignore
+      (write_group
+         b
+         ~pos:(base + block_length)
+         ~block_length:Entry.block_length
+         t.entries
+         ~f:(fun pos e -> Entry.write b ~pos e)
+       : int)
+  ;;
+
+  let read b ~base ~block_length =
+    let entries, _ =
+      read_group b ~pos:(base + block_length) ~f:(fun pos -> Entry.read b ~pos)
+    in
+    { transact_time = Sbe.get_u64 b ~pos:base
+    ; match_event_indicator = Sbe.get_u8 b ~pos:(base + 8)
+    ; entries
+    }
+  ;;
+end
+
+module Snapshot_full_refresh = struct
+  module Entry = struct
+    type t =
+      { px : Price.t option
+      ; size : int option
+      ; number_of_orders : int option
+      ; price_level : int option
+      ; trading_reference_date : int option
+      ; open_close_settl_flag : int option
+      ; settl_price_type : int
+      ; entry_type : char
+      }
+    [@@deriving sexp, compare, equal]
+
+    let block_length = 22
+
+    let write b ~pos t =
+      Sbe.set_price_opt b ~pos t.px;
+      Sbe.set_i32_opt b ~pos:(pos + 8) t.size;
+      Sbe.set_i32_opt b ~pos:(pos + 12) t.number_of_orders;
+      Sbe.set_i8 b ~pos:(pos + 16) (Option.value t.price_level ~default:127);
+      Sbe.set_u16_opt b ~pos:(pos + 17) t.trading_reference_date;
+      Sbe.set_u8_opt b ~pos:(pos + 19) t.open_close_settl_flag;
+      Sbe.set_u8 b ~pos:(pos + 20) t.settl_price_type;
+      Sbe.set_char b ~pos:(pos + 21) t.entry_type
+    ;;
+
+    let read b ~pos =
+      { px = Sbe.get_price_opt b ~pos
+      ; size = Sbe.get_i32_opt b ~pos:(pos + 8)
+      ; number_of_orders = Sbe.get_i32_opt b ~pos:(pos + 12)
+      ; price_level =
+          (match Sbe.get_i8 b ~pos:(pos + 16) with
+           | 127 -> None
+           | l -> Some l)
+      ; trading_reference_date = Sbe.get_u16_opt b ~pos:(pos + 17)
+      ; open_close_settl_flag = Sbe.get_u8_opt b ~pos:(pos + 19)
+      ; settl_price_type = Sbe.get_u8 b ~pos:(pos + 20)
+      ; entry_type = Sbe.get_char b ~pos:(pos + 21)
+      }
+    ;;
+  end
+
+  type t =
+    { last_msg_seq_num_processed : int
+    ; tot_num_reports : int
+    ; security_id : int
+    ; rpt_seq : int
+    ; transact_time : int
+    ; last_update_time : int
+    ; trade_date : int option
+    ; trading_status : Trading_status.t option
+    ; high_limit_price : Price.t option
+    ; low_limit_price : Price.t option
+    ; max_price_variation : Price.t option
+    ; entries : Entry.t list
+    }
+  [@@deriving sexp, compare, equal]
+
+  let template_id = 52
+  let block_length = 59
+  let groups_size t = group_size ~block_length:Entry.block_length t.entries
+
+  let write b ~base t =
+    Sbe.set_u32 b ~pos:base t.last_msg_seq_num_processed;
+    Sbe.set_u32 b ~pos:(base + 4) t.tot_num_reports;
+    Sbe.set_i32 b ~pos:(base + 8) t.security_id;
+    Sbe.set_u32 b ~pos:(base + 12) t.rpt_seq;
+    Sbe.set_u64 b ~pos:(base + 16) t.transact_time;
+    Sbe.set_u64 b ~pos:(base + 24) t.last_update_time;
+    Sbe.set_u16_opt b ~pos:(base + 32) t.trade_date;
+    set_status b ~pos:(base + 34) t.trading_status;
+    Sbe.set_price_opt b ~pos:(base + 35) t.high_limit_price;
+    Sbe.set_price_opt b ~pos:(base + 43) t.low_limit_price;
+    Sbe.set_price_opt b ~pos:(base + 51) t.max_price_variation;
+    ignore
+      (write_group
+         b
+         ~pos:(base + block_length)
+         ~block_length:Entry.block_length
+         t.entries
+         ~f:(fun pos e -> Entry.write b ~pos e)
+       : int)
+  ;;
+
+  let read b ~base ~block_length =
+    let entries, _ =
+      read_group b ~pos:(base + block_length) ~f:(fun pos -> Entry.read b ~pos)
+    in
+    { last_msg_seq_num_processed = Sbe.get_u32 b ~pos:base
+    ; tot_num_reports = Sbe.get_u32 b ~pos:(base + 4)
+    ; security_id = Sbe.get_i32 b ~pos:(base + 8)
+    ; rpt_seq = Sbe.get_u32 b ~pos:(base + 12)
+    ; transact_time = Sbe.get_u64 b ~pos:(base + 16)
+    ; last_update_time = Sbe.get_u64 b ~pos:(base + 24)
+    ; trade_date = Sbe.get_u16_opt b ~pos:(base + 32)
+    ; trading_status = get_status b ~pos:(base + 34)
+    ; high_limit_price = Sbe.get_price_opt b ~pos:(base + 35)
+    ; low_limit_price = Sbe.get_price_opt b ~pos:(base + 43)
+    ; max_price_variation = Sbe.get_price_opt b ~pos:(base + 51)
+    ; entries
+    }
+  ;;
+end
+
 module Message = struct
   type t =
     | Channel_reset of Channel_reset.t
     | Admin_heartbeat
     | Security_status of Security_status.t
     | Instrument_definition_future of Instrument_definition_future.t
+    | Incremental_book of Incremental_book.t
+    | Trade_summary of Trade_summary.t
+    | Daily_statistics of Daily_statistics.t
+    | Snapshot_full_refresh of Snapshot_full_refresh.t
   [@@deriving sexp, compare, equal]
 
   let template_id = function
@@ -450,6 +890,10 @@ module Message = struct
     | Admin_heartbeat -> 12
     | Security_status _ -> Security_status.template_id
     | Instrument_definition_future _ -> Instrument_definition_future.template_id
+    | Incremental_book _ -> Incremental_book.template_id
+    | Trade_summary _ -> Trade_summary.template_id
+    | Daily_statistics _ -> Daily_statistics.template_id
+    | Snapshot_full_refresh _ -> Snapshot_full_refresh.template_id
   ;;
 
   let name = function
@@ -457,6 +901,10 @@ module Message = struct
     | Admin_heartbeat -> "AdminHeartbeat"
     | Security_status _ -> "SecurityStatus"
     | Instrument_definition_future _ -> "MDInstrumentDefinitionFuture"
+    | Incremental_book _ -> "MDIncrementalRefreshBook"
+    | Trade_summary _ -> "MDIncrementalRefreshTradeSummary"
+    | Daily_statistics _ -> "MDIncrementalRefreshDailyStatistics"
+    | Snapshot_full_refresh _ -> "SnapshotFullRefresh"
   ;;
 
   (* Root block length and the size of what follows it. *)
@@ -467,6 +915,11 @@ module Message = struct
     | Instrument_definition_future t ->
       ( Instrument_definition_future.block_length
       , Instrument_definition_future.groups_size t )
+    | Incremental_book t -> Incremental_book.block_length, Incremental_book.groups_size t
+    | Trade_summary t -> Trade_summary.block_length, Trade_summary.groups_size t
+    | Daily_statistics t -> Daily_statistics.block_length, Daily_statistics.groups_size t
+    | Snapshot_full_refresh t ->
+      Snapshot_full_refresh.block_length, Snapshot_full_refresh.groups_size t
   ;;
 
   let write_body t b ~base =
@@ -475,6 +928,10 @@ module Message = struct
     | Admin_heartbeat -> ()
     | Security_status t -> Security_status.write b ~base t
     | Instrument_definition_future t -> Instrument_definition_future.write b ~base t
+    | Incremental_book t -> Incremental_book.write b ~base t
+    | Trade_summary t -> Trade_summary.write b ~base t
+    | Daily_statistics t -> Daily_statistics.write b ~base t
+    | Snapshot_full_refresh t -> Snapshot_full_refresh.write b ~base t
   ;;
 end
 
@@ -554,6 +1011,25 @@ let decode_message_exn b ~pos =
         Some
           (Instrument_definition_future
              (Instrument_definition_future.read b ~base ~block_length:header.block_length))
+      | 46 ->
+        need Incremental_book.block_length;
+        Some
+          (Incremental_book
+             (Incremental_book.read b ~base ~block_length:header.block_length))
+      | 48 ->
+        need Trade_summary.block_length;
+        Some
+          (Trade_summary (Trade_summary.read b ~base ~block_length:header.block_length))
+      | 49 ->
+        need Daily_statistics.block_length;
+        Some
+          (Daily_statistics
+             (Daily_statistics.read b ~base ~block_length:header.block_length))
+      | 52 ->
+        need Snapshot_full_refresh.block_length;
+        Some
+          (Snapshot_full_refresh
+             (Snapshot_full_refresh.read b ~base ~block_length:header.block_length))
       | _ -> None)
   in
   m, pos + size

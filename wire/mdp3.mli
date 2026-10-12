@@ -156,12 +156,154 @@ module Instrument_definition_future : sig
   [@@deriving sexp, compare, equal]
 end
 
+module Entry_type : sig
+  (** [MDEntryType] of book entries. *)
+  type t =
+    | Bid (** ['0'] *)
+    | Offer (** ['1'] *)
+    | Implied_bid (** ['E'] *)
+    | Implied_offer (** ['F'] *)
+    | Book_reset (** ['J'] *)
+  [@@deriving sexp, compare, equal, enumerate]
+
+  val to_char : t -> char
+  val of_char : char -> t option
+end
+
+module Aggressor_side : sig
+  type t =
+    | No_aggressor (** 0 *)
+    | Buy (** 1 *)
+    | Sell (** 2 *)
+  [@@deriving sexp, compare, equal, enumerate]
+end
+
+(** MDIncrementalRefreshBook (46), market by price. *)
+module Incremental_book : sig
+  module Entry : sig
+    type t =
+      { px : Price.t option
+      ; size : int option
+      ; security_id : int
+      ; rpt_seq : int (** per-instrument sequence *)
+      ; number_of_orders : int option
+      ; price_level : int (** 1 is the top of the book *)
+      ; update_action : Update_action.t
+      ; entry_type : Entry_type.t
+      }
+    [@@deriving sexp, compare, equal]
+  end
+
+  type t =
+    { transact_time : int
+    ; match_event_indicator : Match_event.t
+    ; entries : Entry.t list
+    }
+  [@@deriving sexp, compare, equal]
+end
+
+(** MDIncrementalRefreshTradeSummary (48). *)
+module Trade_summary : sig
+  module Entry : sig
+    type t =
+      { px : Price.t
+      ; size : int
+      ; security_id : int
+      ; rpt_seq : int
+      ; number_of_orders : int
+      ; aggressor_side : Aggressor_side.t option
+      ; update_action : Update_action.t
+      ; md_trade_entry_id : int option
+      }
+    [@@deriving sexp, compare, equal]
+  end
+
+  module Order : sig
+    type t =
+      { order_id : int
+      ; last_qty : int
+      }
+    [@@deriving sexp, compare, equal]
+  end
+
+  type t =
+    { transact_time : int
+    ; match_event_indicator : Match_event.t
+    ; entries : Entry.t list
+    ; orders : Order.t list
+    }
+  [@@deriving sexp, compare, equal]
+end
+
+(** MDIncrementalRefreshDailyStatistics (49): settlement, cleared volume, open interest. *)
+module Daily_statistics : sig
+  module Entry : sig
+    type t =
+      { px : Price.t option
+      ; size : int option
+      ; security_id : int
+      ; rpt_seq : int
+      ; trading_reference_date : int option
+      ; settl_price_type : int (** bits: 0 final, 1 actual, 2 rounded, 3 intraday *)
+      ; update_action : Update_action.t
+      ; entry_type : char
+      (** ['6'] settlement, ['B'] cleared volume, ['C'] open interest *)
+      }
+    [@@deriving sexp, compare, equal]
+  end
+
+  type t =
+    { transact_time : int
+    ; match_event_indicator : Match_event.t
+    ; entries : Entry.t list
+    }
+  [@@deriving sexp, compare, equal]
+end
+
+(** SnapshotFullRefresh (52), one instrument. *)
+module Snapshot_full_refresh : sig
+  module Entry : sig
+    type t =
+      { px : Price.t option
+      ; size : int option
+      ; number_of_orders : int option
+      ; price_level : int option
+      ; trading_reference_date : int option
+      ; open_close_settl_flag : int option
+      ; settl_price_type : int
+      ; entry_type : char
+      (** ['0'] bid, ['1'] offer, ['2'] trade, ['6'] settlement, ... *)
+      }
+    [@@deriving sexp, compare, equal]
+  end
+
+  type t =
+    { last_msg_seq_num_processed : int
+    ; tot_num_reports : int
+    ; security_id : int
+    ; rpt_seq : int
+    ; transact_time : int
+    ; last_update_time : int
+    ; trade_date : int option
+    ; trading_status : Trading_status.t option
+    ; high_limit_price : Price.t option
+    ; low_limit_price : Price.t option
+    ; max_price_variation : Price.t option
+    ; entries : Entry.t list
+    }
+  [@@deriving sexp, compare, equal]
+end
+
 module Message : sig
   type t =
     | Channel_reset of Channel_reset.t
     | Admin_heartbeat
     | Security_status of Security_status.t
     | Instrument_definition_future of Instrument_definition_future.t
+    | Incremental_book of Incremental_book.t
+    | Trade_summary of Trade_summary.t
+    | Daily_statistics of Daily_statistics.t
+    | Snapshot_full_refresh of Snapshot_full_refresh.t
   [@@deriving sexp, compare, equal]
 
   val template_id : t -> int
