@@ -8,6 +8,7 @@
   exchange-core
   exchange-core-engine
   fixed-decimal
-  order-book)
+  order-book
+  yojson)
  (preprocess
   (pps ppx_jane)))
