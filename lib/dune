@@ -1,0 +1,13 @@
+(library
+ (name cme_sim)
+ (public_name cme-sim)
+ (libraries
+  core
+  cme-sim.wire
+  equities-core
+  exchange-core
+  exchange-core-engine
+  fixed-decimal
+  order-book)
+ (preprocess
+  (pps ppx_jane)))
