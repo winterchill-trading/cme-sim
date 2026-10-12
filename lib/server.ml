@@ -16,7 +16,7 @@ module Config = struct
     ; feed_heartbeat : Time_ns.Span.t
     ; halt_duration : Time_ns.Span.t
     ; reopen_pre_open : Time_ns.Span.t
-    ; anchors : (Products.t * Anchoring.Target.t) list
+    ; anchors : (Products.t * Anchoring.Reference.t) list
     ; anchor_half_life : Time_ns.Span.t
     }
   [@@deriving sexp_of]
@@ -62,8 +62,11 @@ let ns now = Time_ns.to_int_ns_since_epoch now
 let create (config : Config.t) =
   let venue = Venue.create () in
   let start = Time_ns.now () in
-  let anchoring =
-    Anchoring.create ~half_life:config.anchor_half_life ~start config.anchors
+  (* The anchors' paths start at the venue's time when they are created. *)
+  Venue.set_time venue (ns start);
+  let is_anchored (p : Products.t) =
+    List.exists config.anchors ~f:(fun ((a : Products.t), _) ->
+      a.security_id = p.security_id)
   in
   (* Anchored products always get noise traders: they are the book's only liquidity. *)
   let noise_products =
@@ -76,8 +79,7 @@ let create (config : Config.t) =
         | symbols -> List.filter_map symbols ~f:Products.find_symbol)
     in
     List.filter Products.all ~f:(fun p ->
-      Anchoring.is_anchored anchoring p
-      || List.exists noise ~f:(fun n -> n.security_id = p.security_id))
+      is_anchored p || List.exists noise ~f:(fun n -> n.security_id = p.security_id))
   in
   let sims =
     List.mapi noise_products ~f:(fun i p ->
@@ -92,6 +94,15 @@ let create (config : Config.t) =
           ; max_notional = 500.
           }
           (Venue.exchange venue) ))
+  in
+  let anchoring =
+    Anchoring.create
+      ~half_life:config.anchor_half_life
+      ~log:(fun s -> Log.Global.info_s s)
+      venue
+      (List.filter_map config.anchors ~f:(fun ((p : Products.t), reference) ->
+         List.find_map sims ~f:(fun ((q : Products.t), sim) ->
+           Option.some_if (q.security_id = p.security_id) (p, reference, sim))))
   in
   { config
   ; venue
@@ -208,10 +219,9 @@ let tick_clock t =
 ;;
 
 let tick_noise t =
-  let now = Time_ns.now () in
   with_venue t (fun venue ->
     List.iter t.sims ~f:(fun (p, sim) ->
-      Anchoring.step t.anchoring p sim ~venue ~now;
+      Anchoring.step t.anchoring p;
       match Venue.phase venue ~security_id:p.security_id with
       | Open -> Market_sim.tick sim
       | Pre_open | Halted | Closed -> ());
@@ -346,7 +356,6 @@ let instruments_json t =
 ;;
 
 let anchors_json t =
-  let now = Time_ns.now () in
   let price px = `String (Exchange_core.Price.to_string px) in
   let opt = Option.value_map ~default:`Null ~f:price in
   `List
@@ -359,7 +368,7 @@ let anchors_json t =
              , `String
                  (Sexp.to_string
                     [%sexp (Venue.phase t.venue ~security_id : Venue.Phase.t)]) )
-           ; "target", opt (Anchoring.target t.anchoring p ~now)
+           ; "target", opt (Anchoring.target t.anchoring p)
            ; ( "mark"
              , opt (Exchange.mark (Venue.exchange t.venue) (Products.engine_symbol p)) )
            ; "last", price (Venue.last_price t.venue ~security_id)

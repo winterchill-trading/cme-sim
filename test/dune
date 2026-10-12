@@ -12,6 +12,7 @@
   exchange-core
   exchange-core-engine
   market-data
+  price-anchor
   yojson)
  (preprocess
   (pps ppx_jane)))

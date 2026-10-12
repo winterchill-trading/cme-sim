@@ -20,7 +20,7 @@ type h =
   ; mutable settlement : Price.t option
   }
 
-let create () =
+let create ?(anchor = "6800") () =
   let now = Time_ns.of_string_with_utc_offset "2026-10-12T13:30:00Z" in
   let venue = Venue.create () in
   Venue.set_time venue (Time_ns.to_int_ns_since_epoch now);
@@ -38,8 +38,13 @@ let create () =
   in
   let anchoring =
     Anchoring.create
-      ~start:now
-      [ es, Fixed { price = Price.of_string "6800"; drift_bps_per_day = 0. } ]
+      venue
+      [ ( es
+        , { path = ok_exn (Price_anchor.Path.fixed (Price.of_string anchor))
+          ; price_factor = 1.
+          }
+        , sim )
+      ]
   in
   { venue; sim; anchoring; now; trades = []; settlement = None }
 ;;
@@ -55,7 +60,7 @@ let run h ~secs =
   for _ = 1 to Float.iround_nearest_exn (secs *. 10.) do
     h.now <- Time_ns.add h.now tick;
     Venue.set_time h.venue (Time_ns.to_int_ns_since_epoch h.now);
-    Anchoring.step h.anchoring es h.sim ~venue:h.venue ~now:h.now;
+    Anchoring.step h.anchoring es;
     (match Venue.phase h.venue ~security_id with
      | Open -> Market_sim.tick h.sim
      | Pre_open | Halted | Closed -> ());
@@ -114,11 +119,11 @@ let%expect_test "the anchor waits through pre-open and a halt, and resumes at th
     {|
     pre-open 2 s               Pre_open reference 6700     mark -        last 6700     pulls   0 waits  20 restarts 0
     opening auction            Open     reference 6700     mark -        last 6700     pulls   0 waits  20 restarts 0
-    open 5 s (5 half-lives)    Open     reference 6797     mark 6797     last 6794.5   pulls  50 waits  20 restarts 1
-    halted 3 s                 Halted   reference 6797     mark 6797     last 6794.5   pulls  50 waits  50 restarts 1
+    open 5 s (5 half-lives)    Open     reference 6797     mark 6797     last 6794.5   pulls   1 waits  20 restarts 1
+    halted 3 s                 Halted   reference 6797     mark 6797     last 6794.5   pulls   1 waits  50 restarts 1
     ("reference frozen while halted" true)
-    reopened                   Open     reference 6794.75  mark 6794.75  last 6794.5   pulls  51 waits  60 restarts 2
-    open 5 s more              Open     reference 6799.75  mark 6799.75  last 6802.25  pulls 101 waits  60 restarts 2
+    reopened                   Open     reference 6794.75  mark 6794.75  last 6794.5   pulls   2 waits  60 restarts 2
+    open 5 s more              Open     reference 6799.75  mark 6799.75  last 6802.25  pulls   2 waits  60 restarts 2
     |}]
 ;;
 
@@ -136,7 +141,7 @@ let%expect_test "price limits keep coming from the simulator's own trades" =
         ~trades:(List.length h.trades : int)
         (last_trade : Price.t)
         (settlement : Price.t option)
-        ~target:(Anchoring.target h.anchoring es ~now:h.now : Price.t option)
+        ~target:(Anchoring.target h.anchoring es : Price.t option)
         (low : Price.t)
         (high : Price.t)
         ~limits_from_last_trade:

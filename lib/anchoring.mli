@@ -1,37 +1,31 @@
 (** Ties a product's noise traders to a reference price (the TradFi path of the price
-    anchor design).
+    anchor design), one {!Price_anchor.Anchor} per anchored product.
 
     There is no real-time CME data to shadow or replay, so the noise traders stay the
     book's only liquidity. Their random walk becomes mean-reverting around a reference
-    price: a {!Target.t} gives the reference at any simulated time, and while the product
-    is {!Venue.Phase.Open} each step pulls the walk towards it through
+    price: a {!Price_anchor.Path} pulled on the venue's clock, and while the product is
+    {!Venue.Phase.Open} each step pulls the walk towards it through
     [Market_sim.set_reference ~half_life]; the mark follows on the next noise tick.
 
     In the other phases (pre-open, a limit halt, the maintenance window) the venue owns
-    the price: the anchor neither pulls nor ticks the walk, and only counts the wait. When
-    the product opens again the walk restarts from the venue's last price (the opening
-    auction's, if it traded) and is pulled back towards the reference from there. Daily
-    price limits keep coming from the settlement, i.e. from the simulator's own trades. *)
+    the price: the anchor hands the symbol back to the free walk (which does not tick
+    outside the open) and counts the wait. When the product opens again the walk restarts
+    from the venue's last price (the opening auction's, if it traded) and is pulled back
+    towards the reference from there. Daily price limits keep coming from the settlement,
+    i.e. from the simulator's own trades. *)
 
 open! Core
 module Price := Exchange_core.Price
 module Market_sim := Exchange_core_engine.Market_sim
 
-module Target : sig
+(** Where an anchored product's reference comes from: a path of reference prices and the
+    factor that scales them to the product ([Anchor]'s [price_factor]). *)
+module Reference : sig
   type t =
-    | Series of (Time_ns.t * Price.t) array
-    (** recorded [(time, price)] points in time order; the first point is mapped to the
-        simulator's start and the series is then followed in real time, holding the last
-        point once it ends *)
-    | Fixed of
-        { price : Price.t
-        ; drift_bps_per_day : float (** compounded *)
-        }
+    { path : Price_anchor.Path.t
+    ; price_factor : float
+    }
   [@@deriving sexp_of]
-
-  (** The reference price [elapsed] after the simulator started; [None] for an empty
-      series or a non-positive price. *)
-  val price_at : t -> elapsed:Time_ns.Span.t -> Price.t option
 end
 
 (** A parsed [-anchor-*] flag. *)
@@ -79,39 +73,44 @@ module Norm_range : sig
 end
 
 (** Reads the points of a series file, or the reference prices of a recorded instrument
-    (trades, BBO mids and L2 book mids, in [recv_ts] order) scaled by its factor. *)
+    (book mids, L2 or BBO, else trades: {!Price_anchor.Source.to_path}) with its factor. *)
 val load
   :  ?norm:Norm_range.t
   -> Spec.t
-  -> (Products.t * Target.t) Or_error.t Async.Deferred.t
+  -> (Products.t * Reference.t) Or_error.t Async.Deferred.t
 
 module Stats : sig
   type t =
-    { pulls : int (** steps that pulled the walk towards the reference *)
+    { pulls : int (** reference changes passed to the walk ([Anchor] [marks_set]) *)
     ; waits : int (** steps spent outside the open phase *)
     ; restarts : int (** reopenings that restarted the walk from the venue price *)
-    ; last_target : Price.t option (** the last reference, rounded to the tick *)
+    ; last_target : Price.t option
+    (** the last reference passed to the walk; [None] from a reopening until the next pull *)
     }
   [@@deriving sexp_of]
 end
 
 type t
 
-(** [half_life] defaults to one second. [start] is the simulated time the targets count
-    from. *)
+(** One anchor per [(product, reference, sim)], [sim] being the product's noise traders
+    (it keeps its own noise trader count). [half_life] defaults to one second. The paths
+    start at the venue's current time, so set it first. [log] receives the anchors' pause
+    and resume lines (default: dropped). *)
 val create
   :  ?half_life:Time_ns.Span.t
-  -> start:Time_ns.t
-  -> (Products.t * Target.t) list
+  -> ?log:(Sexp.t -> unit)
+  -> Venue.t
+  -> (Products.t * Reference.t * Market_sim.t) list
   -> t
 
 val is_anchored : t -> Products.t -> bool
 
-(** The reference of an anchored product at [now], rounded to its tick. *)
-val target : t -> Products.t -> now:Time_ns.t -> Price.t option
+(** The reference of an anchored product at the last step, rounded to its tick, before the
+    clamp. *)
+val target : t -> Products.t -> Price.t option
 
-(** Called before each noise tick, with the product's current phase. Does nothing for a
+(** Called before each noise tick, after the venue's time is set. Does nothing for a
     product without an anchor. *)
-val step : t -> Products.t -> Market_sim.t -> venue:Venue.t -> now:Time_ns.t -> unit
+val step : t -> Products.t -> unit
 
 val stats : t -> Products.t -> Stats.t option

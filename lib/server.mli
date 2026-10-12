@@ -21,7 +21,7 @@ module Config : sig
     ; feed_heartbeat : Time_ns.Span.t
     ; halt_duration : Time_ns.Span.t
     ; reopen_pre_open : Time_ns.Span.t (** pre-open before a halt reopens *)
-    ; anchors : (Products.t * Anchoring.Target.t) list
+    ; anchors : (Products.t * Anchoring.Reference.t) list
     (** products tied to a reference price ({!Anchoring}); they get noise traders even
         without [noise] *)
     ; anchor_half_life : Time_ns.Span.t

@@ -104,14 +104,15 @@ let command =
            ~f:(Anchoring.load ?norm)
          >>| ok_exn
        in
-       List.iter anchors ~f:(fun (p, target) ->
+       List.iter anchors ~f:(fun (p, (reference : Anchoring.Reference.t)) ->
          Log.Global.info_s
            [%message
              "anchor"
                ~symbol:(Products.symbol p : string)
                ~start:
-                 (Anchoring.Target.price_at target ~elapsed:Time_ns.Span.zero
-                  : Exchange_core.Price.t option)]);
+                 (Price_anchor.Path.price_at reference.path ~elapsed:Time_ns.Span.zero
+                  : Exchange_core.Price.t)
+               ~factor:(reference.price_factor : float)]);
        let config : Server.Config.t =
          { Server.Config.default with
            clock

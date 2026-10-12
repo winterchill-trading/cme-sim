@@ -2,52 +2,16 @@ open! Core
 open! Async
 module Price = Exchange_core.Price
 module Market_sim = Exchange_core_engine.Market_sim
+module Anchor = Price_anchor.Anchor
+module Path = Price_anchor.Path
+module Source = Price_anchor.Source
 
-let ns_per_day = Time_ns.Span.to_int_ns Time_ns.Span.day
-
-(* Reference prices are synthetic and rounded to the tick afterwards. *)
-let of_float f = (Price.of_float [@alert "-lossy"]) f
-
-module Target = struct
+module Reference = struct
   type t =
-    | Series of (Time_ns.t * Price.t) array
-    | Fixed of
-        { price : Price.t
-        ; drift_bps_per_day : float
-        }
+    { path : Path.t
+    ; price_factor : float
+    }
   [@@deriving sexp_of]
-
-  (* Index of the last point at or before [time], the first point before the series. *)
-  let last_at points time =
-    match
-      Array.binary_search
-        points
-        ~compare:(fun (t, _) time -> Time_ns.compare t time)
-        `Last_less_than_or_equal_to
-        time
-    with
-    | Some i -> i
-    | None -> 0
-  ;;
-
-  let price_at t ~elapsed =
-    let px =
-      match t with
-      | Series [||] -> None
-      | Series points ->
-        let first, _ = points.(0) in
-        Some (snd points.(last_at points (Time_ns.add first elapsed)))
-      | Fixed { price; drift_bps_per_day } ->
-        let days =
-          Float.of_int (Time_ns.Span.to_int_ns elapsed) /. Float.of_int ns_per_day
-        in
-        let px =
-          Price.to_float price *. ((1. +. (drift_bps_per_day /. 10_000.)) **. days)
-        in
-        Option.some_if (Float.is_finite px && Float.( < ) px 1e12) (of_float px)
-    in
-    Option.filter px ~f:Price.is_positive
-  ;;
 end
 
 module Spec = struct
@@ -142,42 +106,17 @@ module Norm_range = struct
   [@@deriving sexp_of]
 end
 
-let scaled_points items ~factor =
-  let book = Price_anchor.Ref_book.create () in
-  let scale px = of_float (Price.to_float px *. factor) in
-  Pipe.fold_without_pushback
-    items
-    ~init:[]
-    ~f:(fun acc (item : Price_anchor.Source.Item.t) ->
-      let point ts px = (ts, scale px) :: acc in
-      match item with
-      | Price { recv_ts; price } -> point recv_ts price
-      | Gap _ ->
-        Price_anchor.Ref_book.clear book;
-        acc
-      | Event (Trade trade) -> point trade.recv_ts trade.price
-      | Event (Bbo bbo) -> point bbo.recv_ts (Market_data.Bbo.mid bbo)
-      | Event (L2 update) ->
-        Price_anchor.Ref_book.apply_l2 book update;
-        (match Price_anchor.Ref_book.mid book with
-         | Some mid -> point update.recv_ts mid
-         | None -> acc)
-      | Event (Funding _) -> acc)
-  >>| fun points -> Array.of_list_rev points
-;;
-
 let load ?norm ({ source; product } : Spec.t) =
   let open Deferred.Or_error.Let_syntax in
-  let%map target =
+  let%map reference =
     match source with
     | Fixed { price; drift_bps_per_day } ->
-      return (Target.Fixed { price; drift_bps_per_day })
+      let%map path = Deferred.return (Path.fixed ~drift_bps_per_day price) in
+      { Reference.path; price_factor = 1. }
     | Series_file file ->
-      let%bind items = Price_anchor.Source.of_series file in
-      let%bind points = Deferred.ok (scaled_points items ~factor:1.) in
-      if Array.is_empty points
-      then Deferred.Or_error.error_s [%message "empty series" file]
-      else return (Target.Series points)
+      let%bind items = Source.of_series file in
+      let%map path = Source.to_path items in
+      { Reference.path; price_factor = 1. }
     | Scaled { reference; factor } ->
       (match norm with
        | None ->
@@ -186,15 +125,11 @@ let load ?norm ({ source; product } : Spec.t) =
              "a scaled anchor needs a normalized data range"
                (reference : Market_data.Instrument.t)]
        | Some { Norm_range.dir; from; to_ } ->
-         let%bind items = Price_anchor.Source.of_norm ~dir reference ~from ~to_ in
-         let%bind points = Deferred.ok (scaled_points items ~factor) in
-         if Array.is_empty points
-         then
-           Deferred.Or_error.error_s
-             [%message "no reference prices" (reference : Market_data.Instrument.t)]
-         else return (Target.Series points))
+         let%bind items = Source.of_norm ~dir reference ~from ~to_ in
+         let%map path = Source.to_path items in
+         { Reference.path; price_factor = factor })
   in
-  product, target
+  product, reference
 ;;
 
 module Stats = struct
@@ -207,73 +142,55 @@ module Stats = struct
   [@@deriving sexp_of]
 end
 
-type entry =
-  { product : Products.t
-  ; target_ : Target.t
-  ; mutable stats : Stats.t
-  ; mutable was_open : bool
-  }
-
 type t =
-  { half_life : Time_ns.Span.t
-  ; start : Time_ns.t
-  ; entries : entry Int.Table.t (** by security id *)
+  { venue : Venue.t
+  ; anchors : Anchor.t Int.Table.t (** by security id *)
   }
 
-let create ?(half_life = Time_ns.Span.of_sec 1.) ~start targets =
-  let entries = Int.Table.create () in
-  List.iter targets ~f:(fun ((product : Products.t), target_) ->
+let create ?(half_life = Time_ns.Span.of_sec 1.) ?log venue products =
+  let exchange = Venue.exchange venue in
+  let anchors = Int.Table.create () in
+  List.iter products ~f:(fun ((p : Products.t), (reference : Reference.t), sim) ->
+    let security_id = p.security_id in
+    let sim_symbol = Products.engine_symbol p in
     Hashtbl.set
-      entries
-      ~key:product.security_id
+      anchors
+      ~key:security_id
       ~data:
-        { product
-        ; target_
-        ; stats = { pulls = 0; waits = 0; restarts = 0; last_target = None }
-        ; was_open = true
-        });
-  { half_life; start; entries }
+        (Anchor.create
+           ~price_factor:reference.price_factor
+           ~levels:0
+           ~mark_interval:Time_ns.Span.zero
+           ~noise_traders:(Market_sim.noise_traders sim sim_symbol)
+           ~half_life
+           ~may_engage:(fun () -> Venue.Phase.equal (Venue.phase venue ~security_id) Open)
+           ~last_trade:(fun () -> Some (Venue.last_price venue ~security_id))
+           ~step_clock:false
+           ~path:reference.path
+           ?log
+           ~market_sim:sim
+           ~exchange
+           ~reference:(Market_data.Instrument.create Cme (Products.symbol p))
+           ~sim_symbol
+           ()));
+  { venue; anchors }
 ;;
 
-let is_anchored t (p : Products.t) = Hashtbl.mem t.entries p.security_id
+let find t (p : Products.t) = Hashtbl.find t.anchors p.security_id
+let is_anchored t p = Option.is_some (find t p)
+let target t p = Option.bind (find t p) ~f:Anchor.reference_price
 
-let target_of t entry ~now =
-  Target.price_at entry.target_ ~elapsed:(Time_ns.diff now t.start)
-  |> Option.map ~f:(fun px ->
-    Equities_core.Tick_size.round ~tick:(Products.tick entry.product) `Nearest px)
-  |> Option.filter ~f:Price.is_positive
+let step t p =
+  Option.iter (find t p) ~f:(fun anchor ->
+    Anchor.step anchor ~now:(Exchange_core_engine.Exchange.now (Venue.exchange t.venue)))
 ;;
 
-let target t (p : Products.t) ~now =
-  Option.bind (Hashtbl.find t.entries p.security_id) ~f:(target_of t ~now)
-;;
-
-let step t (p : Products.t) sim ~venue ~now =
-  match Hashtbl.find t.entries p.security_id with
-  | None -> ()
-  | Some entry ->
-    let symbol = Products.engine_symbol p in
-    (match Venue.phase venue ~security_id:p.security_id with
-     | Open ->
-       if not entry.was_open
-       then (
-         Market_sim.set_reference
-           sim
-           symbol
-           (Venue.last_price venue ~security_id:p.security_id);
-         entry.stats <- { entry.stats with restarts = entry.stats.restarts + 1 });
-       entry.was_open <- true;
-       (match target_of t entry ~now with
-        | None -> ()
-        | Some px ->
-          Market_sim.set_reference ~half_life:t.half_life sim symbol px;
-          entry.stats
-          <- { entry.stats with pulls = entry.stats.pulls + 1; last_target = Some px })
-     | Pre_open | Halted | Closed ->
-       entry.was_open <- false;
-       entry.stats <- { entry.stats with waits = entry.stats.waits + 1 })
-;;
-
-let stats t (p : Products.t) =
-  Option.map (Hashtbl.find t.entries p.security_id) ~f:(fun e -> e.stats)
+let stats t p =
+  Option.map (find t p) ~f:(fun anchor ->
+    let s = Anchor.stats anchor in
+    { Stats.pulls = s.marks_set
+    ; waits = s.waits
+    ; restarts = s.resumes
+    ; last_target = Anchor.last_set anchor
+    })
 ;;
