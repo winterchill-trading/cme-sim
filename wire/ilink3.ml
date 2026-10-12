@@ -673,6 +673,661 @@ module Order_cancel_request = struct
   ;;
 end
 
+module Exec_common = struct
+  type t =
+    { seq_num : int
+    ; uuid : int
+    ; exec_id : string
+    ; sender_id : string
+    ; cl_ord_id : string
+    ; party_details_list_req_id : int
+    ; order_id : int
+    ; transact_time : int
+    ; sending_time : int
+    ; order_request_id : int
+    ; location : string
+    ; security_id : int
+    ; side : Side.t
+    ; manual : bool
+    ; poss_retrans : bool
+    }
+  [@@deriving sexp, compare, equal]
+
+  (* Offsets of the shared fields in one template. SenderID, ClOrdID and
+     PartyDetailsListReqID follow ExecID at +40, +60 and +80; SendingTimeEpoch and
+     OrderRequestID follow TransactTime at +8 and +16. SeqNum and UUID are always at 0 and
+
+     4. *)
+  type layout =
+    { exec_id_at : int
+    ; order_id_at : int
+    ; transact_time_at : int
+    ; location_at : int
+    ; security_id_at : int
+    ; side_at : int
+    ; manual_at : int
+    ; poss_retrans_at : int
+    }
+
+  let write l b ~base t =
+    Sbe.set_u32 b ~pos:base t.seq_num;
+    Sbe.set_u64 b ~pos:(base + 4) t.uuid;
+    Sbe.set_string b ~pos:(base + l.exec_id_at) ~len:40 t.exec_id;
+    Sbe.set_string b ~pos:(base + l.exec_id_at + 40) ~len:20 t.sender_id;
+    Sbe.set_string b ~pos:(base + l.exec_id_at + 60) ~len:20 t.cl_ord_id;
+    Sbe.set_u64 b ~pos:(base + l.exec_id_at + 80) t.party_details_list_req_id;
+    Sbe.set_u64 b ~pos:(base + l.order_id_at) t.order_id;
+    Sbe.set_u64 b ~pos:(base + l.transact_time_at) t.transact_time;
+    Sbe.set_u64 b ~pos:(base + l.transact_time_at + 8) t.sending_time;
+    Sbe.set_u64 b ~pos:(base + l.transact_time_at + 16) t.order_request_id;
+    Sbe.set_string b ~pos:(base + l.location_at) ~len:5 t.location;
+    Sbe.set_i32 b ~pos:(base + l.security_id_at) t.security_id;
+    Sbe.set_u8 b ~pos:(base + l.side_at) (Side.to_int t.side);
+    Sbe.set_bool b ~pos:(base + l.manual_at) t.manual;
+    Sbe.set_bool b ~pos:(base + l.poss_retrans_at) t.poss_retrans
+  ;;
+
+  let read l b ~base =
+    { seq_num = Sbe.get_u32 b ~pos:base
+    ; uuid = Sbe.get_u64 b ~pos:(base + 4)
+    ; exec_id = Sbe.get_string b ~pos:(base + l.exec_id_at) ~len:40
+    ; sender_id = Sbe.get_string b ~pos:(base + l.exec_id_at + 40) ~len:20
+    ; cl_ord_id = Sbe.get_string b ~pos:(base + l.exec_id_at + 60) ~len:20
+    ; party_details_list_req_id = Sbe.get_u64 b ~pos:(base + l.exec_id_at + 80)
+    ; order_id = Sbe.get_u64 b ~pos:(base + l.order_id_at)
+    ; transact_time = Sbe.get_u64 b ~pos:(base + l.transact_time_at)
+    ; sending_time = Sbe.get_u64 b ~pos:(base + l.transact_time_at + 8)
+    ; order_request_id = Sbe.get_u64 b ~pos:(base + l.transact_time_at + 16)
+    ; location = Sbe.get_string b ~pos:(base + l.location_at) ~len:5
+    ; security_id = Sbe.get_i32 b ~pos:(base + l.security_id_at)
+    ; side = decode_side b ~pos:(base + l.side_at)
+    ; manual = Sbe.get_bool b ~pos:(base + l.manual_at)
+    ; poss_retrans = Sbe.get_bool b ~pos:(base + l.poss_retrans_at)
+    }
+  ;;
+end
+
+(* Writes the null value of several 1-byte optional fields. *)
+let nulls_u8 b ~base offsets =
+  List.iter offsets ~f:(fun o -> set_null_u8 b ~pos:(base + o))
+;;
+
+let null_u64 b ~pos = Sbe.set_u64_opt b ~pos None
+
+module Business_reject = struct
+  type t =
+    { seq_num : int
+    ; uuid : int
+    ; text : string
+    ; sender_id : string
+    ; party_details_list_req_id : int option
+    ; sending_time : int
+    ; business_reject_ref_id : int option
+    ; location : string
+    ; ref_seq_num : int option
+    ; ref_tag_id : int option
+    ; business_reject_reason : int
+    ; ref_msg_type : string
+    ; poss_retrans : bool
+    }
+  [@@deriving sexp, compare, equal]
+
+  let template_id = 521
+  let block_length = 330
+
+  let write b ~base t =
+    Sbe.set_u32 b ~pos:base t.seq_num;
+    Sbe.set_u64 b ~pos:(base + 4) t.uuid;
+    Sbe.set_string b ~pos:(base + 12) ~len:256 t.text;
+    Sbe.set_string b ~pos:(base + 268) ~len:20 t.sender_id;
+    Sbe.set_u64_opt b ~pos:(base + 288) t.party_details_list_req_id;
+    Sbe.set_u64 b ~pos:(base + 296) t.sending_time;
+    Sbe.set_u64_opt b ~pos:(base + 304) t.business_reject_ref_id;
+    Sbe.set_string b ~pos:(base + 312) ~len:5 t.location;
+    Sbe.set_u32_opt b ~pos:(base + 317) t.ref_seq_num;
+    Sbe.set_u16_opt b ~pos:(base + 321) t.ref_tag_id;
+    Sbe.set_u16 b ~pos:(base + 323) t.business_reject_reason;
+    Sbe.set_string b ~pos:(base + 325) ~len:2 t.ref_msg_type;
+    Sbe.set_bool b ~pos:(base + 327) t.poss_retrans;
+    nulls_u8 b ~base [ 328; 329 ]
+  ;;
+
+  let read b ~base =
+    { seq_num = Sbe.get_u32 b ~pos:base
+    ; uuid = Sbe.get_u64 b ~pos:(base + 4)
+    ; text = Sbe.get_string b ~pos:(base + 12) ~len:256
+    ; sender_id = Sbe.get_string b ~pos:(base + 268) ~len:20
+    ; party_details_list_req_id = Sbe.get_u64_opt b ~pos:(base + 288)
+    ; sending_time = Sbe.get_u64 b ~pos:(base + 296)
+    ; business_reject_ref_id = Sbe.get_u64_opt b ~pos:(base + 304)
+    ; location = Sbe.get_string b ~pos:(base + 312) ~len:5
+    ; ref_seq_num = Sbe.get_u32_opt b ~pos:(base + 317)
+    ; ref_tag_id = Sbe.get_u16_opt b ~pos:(base + 321)
+    ; business_reject_reason = Sbe.get_u16 b ~pos:(base + 323)
+    ; ref_msg_type = Sbe.get_string b ~pos:(base + 325) ~len:2
+    ; poss_retrans = Sbe.get_bool b ~pos:(base + 327)
+    }
+  ;;
+end
+
+module Execution_report_new = struct
+  type t =
+    { common : Exec_common.t
+    ; price : Price.t
+    ; stop_px : Price.t option
+    ; order_qty : int
+    ; min_qty : int option
+    ; display_qty : int option
+    ; ord_type : Ord_type.t
+    ; time_in_force : Time_in_force.t
+    }
+  [@@deriving sexp, compare, equal]
+
+  let template_id = 522
+  let block_length = 209
+
+  let layout : Exec_common.layout =
+    { exec_id_at = 12
+    ; order_id_at = 100
+    ; transact_time_at = 124
+    ; location_at = 164
+    ; security_id_at = 169
+    ; side_at = 190
+    ; manual_at = 192
+    ; poss_retrans_at = 193
+    }
+  ;;
+
+  let write b ~base t =
+    Exec_common.write layout b ~base t.common;
+    Sbe.set_price b ~pos:(base + 108) t.price;
+    Sbe.set_price_opt b ~pos:(base + 116) t.stop_px;
+    null_u64 b ~pos:(base + 148);
+    null_u64 b ~pos:(base + 156);
+    Sbe.set_u32 b ~pos:(base + 173) t.order_qty;
+    Sbe.set_u32_opt b ~pos:(base + 177) t.min_qty;
+    Sbe.set_u32_opt b ~pos:(base + 181) t.display_qty;
+    Sbe.set_u16_opt b ~pos:(base + 185) None;
+    Sbe.set_u16_opt b ~pos:(base + 187) None;
+    Sbe.set_char b ~pos:(base + 189) (Ord_type.to_char t.ord_type);
+    Sbe.set_u8 b ~pos:(base + 191) (Time_in_force.to_int t.time_in_force);
+    nulls_u8 b ~base [ 194; 195; 198; 199; 200 ];
+    null_u64 b ~pos:(base + 201)
+  ;;
+
+  let read b ~base =
+    { common = Exec_common.read layout b ~base
+    ; price = Sbe.get_price b ~pos:(base + 108)
+    ; stop_px = Sbe.get_price_opt b ~pos:(base + 116)
+    ; order_qty = Sbe.get_u32 b ~pos:(base + 173)
+    ; min_qty = Sbe.get_u32_opt b ~pos:(base + 177)
+    ; display_qty = Sbe.get_u32_opt b ~pos:(base + 181)
+    ; ord_type = decode_ord_type b ~pos:(base + 189)
+    ; time_in_force = decode_tif b ~pos:(base + 191)
+    }
+  ;;
+end
+
+module Execution_report_reject = struct
+  type t =
+    { common : Exec_common.t
+    ; text : string
+    ; price : Price.t option
+    ; stop_px : Price.t option
+    ; order_qty : int
+    ; min_qty : int option
+    ; display_qty : int option
+    ; ord_rej_reason : int
+    ; ord_type : Ord_type.t
+    ; time_in_force : Time_in_force.t
+    }
+  [@@deriving sexp, compare, equal]
+
+  let template_id = 523
+  let block_length = 467
+
+  let layout : Exec_common.layout =
+    { exec_id_at = 268
+    ; order_id_at = 356
+    ; transact_time_at = 380
+    ; location_at = 420
+    ; security_id_at = 425
+    ; side_at = 448
+    ; manual_at = 450
+    ; poss_retrans_at = 451
+    }
+  ;;
+
+  let write b ~base t =
+    Exec_common.write layout b ~base t.common;
+    Sbe.set_string b ~pos:(base + 12) ~len:256 t.text;
+    Sbe.set_price_opt b ~pos:(base + 364) t.price;
+    Sbe.set_price_opt b ~pos:(base + 372) t.stop_px;
+    null_u64 b ~pos:(base + 404);
+    null_u64 b ~pos:(base + 412);
+    Sbe.set_u32 b ~pos:(base + 429) t.order_qty;
+    Sbe.set_u32_opt b ~pos:(base + 433) t.min_qty;
+    Sbe.set_u32_opt b ~pos:(base + 437) t.display_qty;
+    Sbe.set_u16 b ~pos:(base + 441) t.ord_rej_reason;
+    Sbe.set_u16_opt b ~pos:(base + 443) None;
+    Sbe.set_u16_opt b ~pos:(base + 445) None;
+    Sbe.set_char b ~pos:(base + 447) (Ord_type.to_char t.ord_type);
+    Sbe.set_u8 b ~pos:(base + 449) (Time_in_force.to_int t.time_in_force);
+    nulls_u8 b ~base [ 452; 453; 456; 457; 458 ];
+    null_u64 b ~pos:(base + 459)
+  ;;
+
+  let read b ~base =
+    { common = Exec_common.read layout b ~base
+    ; text = Sbe.get_string b ~pos:(base + 12) ~len:256
+    ; price = Sbe.get_price_opt b ~pos:(base + 364)
+    ; stop_px = Sbe.get_price_opt b ~pos:(base + 372)
+    ; order_qty = Sbe.get_u32 b ~pos:(base + 429)
+    ; min_qty = Sbe.get_u32_opt b ~pos:(base + 433)
+    ; display_qty = Sbe.get_u32_opt b ~pos:(base + 437)
+    ; ord_rej_reason = Sbe.get_u16 b ~pos:(base + 441)
+    ; ord_type = decode_ord_type b ~pos:(base + 447)
+    ; time_in_force = decode_tif b ~pos:(base + 449)
+    }
+  ;;
+end
+
+module Execution_report_elimination = struct
+  type t =
+    { common : Exec_common.t
+    ; price : Price.t
+    ; cum_qty : int
+    ; order_qty : int
+    ; min_qty : int option
+    ; display_qty : int option
+    ; ord_type : Ord_type.t
+    ; time_in_force : Time_in_force.t
+    }
+  [@@deriving sexp, compare, equal]
+
+  let template_id = 524
+  let block_length = 202
+
+  let layout : Exec_common.layout =
+    { exec_id_at = 12
+    ; order_id_at = 100
+    ; transact_time_at = 124
+    ; location_at = 164
+    ; security_id_at = 169
+    ; side_at = 192
+    ; manual_at = 194
+    ; poss_retrans_at = 195
+    }
+  ;;
+
+  let write b ~base t =
+    Exec_common.write layout b ~base t.common;
+    Sbe.set_price b ~pos:(base + 108) t.price;
+    Sbe.set_price_opt b ~pos:(base + 116) None;
+    null_u64 b ~pos:(base + 148);
+    null_u64 b ~pos:(base + 156);
+    Sbe.set_u32 b ~pos:(base + 173) t.cum_qty;
+    Sbe.set_u32 b ~pos:(base + 177) t.order_qty;
+    Sbe.set_u32_opt b ~pos:(base + 181) t.min_qty;
+    Sbe.set_u32_opt b ~pos:(base + 185) t.display_qty;
+    Sbe.set_u16_opt b ~pos:(base + 189) None;
+    Sbe.set_char b ~pos:(base + 191) (Ord_type.to_char t.ord_type);
+    Sbe.set_u8 b ~pos:(base + 193) (Time_in_force.to_int t.time_in_force);
+    nulls_u8 b ~base [ 196; 199; 200; 201 ]
+  ;;
+
+  let read b ~base =
+    { common = Exec_common.read layout b ~base
+    ; price = Sbe.get_price b ~pos:(base + 108)
+    ; cum_qty = Sbe.get_u32 b ~pos:(base + 173)
+    ; order_qty = Sbe.get_u32 b ~pos:(base + 177)
+    ; min_qty = Sbe.get_u32_opt b ~pos:(base + 181)
+    ; display_qty = Sbe.get_u32_opt b ~pos:(base + 185)
+    ; ord_type = decode_ord_type b ~pos:(base + 191)
+    ; time_in_force = decode_tif b ~pos:(base + 193)
+    }
+  ;;
+end
+
+module Fill = struct
+  type t =
+    { fill_px : Price.t
+    ; fill_qty : int
+    ; fill_exec_id : string
+    ; fill_yield_type : int
+    }
+  [@@deriving sexp, compare, equal]
+
+  let block_length = 15
+
+  let write b ~pos t =
+    Sbe.set_price b ~pos t.fill_px;
+    Sbe.set_u32 b ~pos:(pos + 8) t.fill_qty;
+    Sbe.set_string b ~pos:(pos + 12) ~len:2 t.fill_exec_id;
+    Sbe.set_u8 b ~pos:(pos + 14) t.fill_yield_type
+  ;;
+
+  let read b ~pos =
+    { fill_px = Sbe.get_price b ~pos
+    ; fill_qty = Sbe.get_u32 b ~pos:(pos + 8)
+    ; fill_exec_id = Sbe.get_string b ~pos:(pos + 12) ~len:2
+    ; fill_yield_type = Sbe.get_u8 b ~pos:(pos + 14)
+    }
+  ;;
+end
+
+module Execution_report_trade_outright = struct
+  module Ord_status = struct
+    type t =
+      | Partially_filled
+      | Filled
+    [@@deriving sexp, compare, equal]
+  end
+
+  type t =
+    { common : Exec_common.t
+    ; last_px : Price.t
+    ; price : Price.t
+    ; sec_exec_id : int
+    ; order_qty : int
+    ; last_qty : int
+    ; cum_qty : int
+    ; md_trade_entry_id : int
+    ; side_trade_id : int
+    ; leaves_qty : int
+    ; trade_date : int option
+    ; ord_status : Ord_status.t
+    ; ord_type : Ord_type.t
+    ; time_in_force : Time_in_force.t
+    ; aggressor : bool
+    ; fills : Fill.t list
+    }
+  [@@deriving sexp, compare, equal]
+
+  let template_id = 525
+  let block_length = 235
+  let order_event_block_length = 23
+
+  (* NoFills and NoOrderEvents group headers; no order events are sent. *)
+  let extra t = (2 * Sbe.Group.size) + (Fill.block_length * List.length t.fills)
+
+  let layout : Exec_common.layout =
+    { exec_id_at = 12
+    ; order_id_at = 108
+    ; transact_time_at = 132
+    ; location_at = 180
+    ; security_id_at = 185
+    ; side_at = 223
+    ; manual_at = 225
+    ; poss_retrans_at = 226
+    }
+  ;;
+
+  let write b ~base t =
+    Exec_common.write layout b ~base t.common;
+    Sbe.set_price b ~pos:(base + 100) t.last_px;
+    Sbe.set_price b ~pos:(base + 116) t.price;
+    Sbe.set_price_opt b ~pos:(base + 124) None;
+    Sbe.set_u64 b ~pos:(base + 156) t.sec_exec_id;
+    null_u64 b ~pos:(base + 164);
+    null_u64 b ~pos:(base + 172);
+    Sbe.set_u32 b ~pos:(base + 189) t.order_qty;
+    Sbe.set_u32 b ~pos:(base + 193) t.last_qty;
+    Sbe.set_u32 b ~pos:(base + 197) t.cum_qty;
+    Sbe.set_u32 b ~pos:(base + 201) t.md_trade_entry_id;
+    Sbe.set_u32 b ~pos:(base + 205) t.side_trade_id;
+    Sbe.set_u32_opt b ~pos:(base + 209) None;
+    Sbe.set_u32 b ~pos:(base + 213) t.leaves_qty;
+    Sbe.set_u16_opt b ~pos:(base + 217) t.trade_date;
+    Sbe.set_u16_opt b ~pos:(base + 219) None;
+    Sbe.set_u8
+      b
+      ~pos:(base + 221)
+      (match t.ord_status with
+       | Partially_filled -> 1
+       | Filled -> 2);
+    Sbe.set_char b ~pos:(base + 222) (Ord_type.to_char t.ord_type);
+    Sbe.set_u8 b ~pos:(base + 224) (Time_in_force.to_int t.time_in_force);
+    Sbe.set_bool b ~pos:(base + 227) t.aggressor;
+    nulls_u8 b ~base [ 228; 231; 232; 233 ];
+    let pos =
+      Sbe.Group.write
+        b
+        ~pos:(base + block_length)
+        ~block_length:Fill.block_length
+        (List.length t.fills)
+    in
+    let pos =
+      List.fold t.fills ~init:pos ~f:(fun pos fill ->
+        Fill.write b ~pos fill;
+        pos + Fill.block_length)
+    in
+    ignore (Sbe.Group.write b ~pos ~block_length:order_event_block_length 0 : int)
+  ;;
+
+  let read b ~base ~block_length =
+    let ord_status : Ord_status.t =
+      match Sbe.get_u8 b ~pos:(base + 221) with
+      | 1 -> Partially_filled
+      | 2 -> Filled
+      | v -> fail "invalid trade OrdStatus %d" v
+    in
+    let fill_block, n, pos = Sbe.Group.read b ~pos:(base + block_length) in
+    let fills = List.init n ~f:(fun i -> Fill.read b ~pos:(pos + (i * fill_block))) in
+    { common = Exec_common.read layout b ~base
+    ; last_px = Sbe.get_price b ~pos:(base + 100)
+    ; price = Sbe.get_price b ~pos:(base + 116)
+    ; sec_exec_id = Sbe.get_u64 b ~pos:(base + 156)
+    ; order_qty = Sbe.get_u32 b ~pos:(base + 189)
+    ; last_qty = Sbe.get_u32 b ~pos:(base + 193)
+    ; cum_qty = Sbe.get_u32 b ~pos:(base + 197)
+    ; md_trade_entry_id = Sbe.get_u32 b ~pos:(base + 201)
+    ; side_trade_id = Sbe.get_u32 b ~pos:(base + 205)
+    ; leaves_qty = Sbe.get_u32 b ~pos:(base + 213)
+    ; trade_date = Sbe.get_u16_opt b ~pos:(base + 217)
+    ; ord_status
+    ; ord_type = decode_ord_type b ~pos:(base + 222)
+    ; time_in_force = decode_tif b ~pos:(base + 224)
+    ; aggressor = Sbe.get_bool b ~pos:(base + 227)
+    ; fills
+    }
+  ;;
+end
+
+module Execution_report_modify = struct
+  type t =
+    { common : Exec_common.t
+    ; price : Price.t
+    ; stop_px : Price.t option
+    ; order_qty : int
+    ; cum_qty : int
+    ; leaves_qty : int
+    ; min_qty : int option
+    ; display_qty : int option
+    ; ord_type : Ord_type.t
+    ; time_in_force : Time_in_force.t
+    }
+  [@@deriving sexp, compare, equal]
+
+  let template_id = 531
+  let block_length = 217
+
+  let layout : Exec_common.layout =
+    { exec_id_at = 12
+    ; order_id_at = 100
+    ; transact_time_at = 124
+    ; location_at = 164
+    ; security_id_at = 169
+    ; side_at = 198
+    ; manual_at = 200
+    ; poss_retrans_at = 201
+    }
+  ;;
+
+  let write b ~base t =
+    Exec_common.write layout b ~base t.common;
+    Sbe.set_price b ~pos:(base + 108) t.price;
+    Sbe.set_price_opt b ~pos:(base + 116) t.stop_px;
+    null_u64 b ~pos:(base + 148);
+    null_u64 b ~pos:(base + 156);
+    Sbe.set_u32 b ~pos:(base + 173) t.order_qty;
+    Sbe.set_u32 b ~pos:(base + 177) t.cum_qty;
+    Sbe.set_u32 b ~pos:(base + 181) t.leaves_qty;
+    Sbe.set_u32_opt b ~pos:(base + 185) t.min_qty;
+    Sbe.set_u32_opt b ~pos:(base + 189) t.display_qty;
+    Sbe.set_u16_opt b ~pos:(base + 193) None;
+    Sbe.set_u16_opt b ~pos:(base + 195) None;
+    Sbe.set_char b ~pos:(base + 197) (Ord_type.to_char t.ord_type);
+    Sbe.set_u8 b ~pos:(base + 199) (Time_in_force.to_int t.time_in_force);
+    nulls_u8 b ~base [ 202; 203; 206; 207; 208 ];
+    null_u64 b ~pos:(base + 209)
+  ;;
+
+  let read b ~base =
+    { common = Exec_common.read layout b ~base
+    ; price = Sbe.get_price b ~pos:(base + 108)
+    ; stop_px = Sbe.get_price_opt b ~pos:(base + 116)
+    ; order_qty = Sbe.get_u32 b ~pos:(base + 173)
+    ; cum_qty = Sbe.get_u32 b ~pos:(base + 177)
+    ; leaves_qty = Sbe.get_u32 b ~pos:(base + 181)
+    ; min_qty = Sbe.get_u32_opt b ~pos:(base + 185)
+    ; display_qty = Sbe.get_u32_opt b ~pos:(base + 189)
+    ; ord_type = decode_ord_type b ~pos:(base + 197)
+    ; time_in_force = decode_tif b ~pos:(base + 199)
+    }
+  ;;
+end
+
+module Execution_report_cancel = struct
+  type t =
+    { common : Exec_common.t
+    ; price : Price.t
+    ; stop_px : Price.t option
+    ; order_qty : int
+    ; cum_qty : int
+    ; min_qty : int option
+    ; display_qty : int option
+    ; ord_type : Ord_type.t
+    ; time_in_force : Time_in_force.t
+    ; exec_restatement_reason : int option
+    }
+  [@@deriving sexp, compare, equal]
+
+  let template_id = 534
+  let block_length = 214
+
+  let layout : Exec_common.layout =
+    { exec_id_at = 12
+    ; order_id_at = 100
+    ; transact_time_at = 124
+    ; location_at = 164
+    ; security_id_at = 169
+    ; side_at = 194
+    ; manual_at = 196
+    ; poss_retrans_at = 197
+    }
+  ;;
+
+  let write b ~base t =
+    Exec_common.write layout b ~base t.common;
+    Sbe.set_price b ~pos:(base + 108) t.price;
+    Sbe.set_price_opt b ~pos:(base + 116) t.stop_px;
+    null_u64 b ~pos:(base + 148);
+    null_u64 b ~pos:(base + 156);
+    Sbe.set_u32 b ~pos:(base + 173) t.order_qty;
+    Sbe.set_u32 b ~pos:(base + 177) t.cum_qty;
+    Sbe.set_u32_opt b ~pos:(base + 181) t.min_qty;
+    Sbe.set_u32_opt b ~pos:(base + 185) t.display_qty;
+    Sbe.set_u16_opt b ~pos:(base + 189) None;
+    Sbe.set_u16_opt b ~pos:(base + 191) None;
+    Sbe.set_char b ~pos:(base + 193) (Ord_type.to_char t.ord_type);
+    Sbe.set_u8 b ~pos:(base + 195) (Time_in_force.to_int t.time_in_force);
+    set_null_u8 b ~pos:(base + 198);
+    Sbe.set_u8_opt b ~pos:(base + 199) t.exec_restatement_reason;
+    nulls_u8 b ~base [ 200; 203; 204; 205 ];
+    null_u64 b ~pos:(base + 206)
+  ;;
+
+  let read b ~base =
+    { common = Exec_common.read layout b ~base
+    ; price = Sbe.get_price b ~pos:(base + 108)
+    ; stop_px = Sbe.get_price_opt b ~pos:(base + 116)
+    ; order_qty = Sbe.get_u32 b ~pos:(base + 173)
+    ; cum_qty = Sbe.get_u32 b ~pos:(base + 177)
+    ; min_qty = Sbe.get_u32_opt b ~pos:(base + 181)
+    ; display_qty = Sbe.get_u32_opt b ~pos:(base + 185)
+    ; ord_type = decode_ord_type b ~pos:(base + 193)
+    ; time_in_force = decode_tif b ~pos:(base + 195)
+    ; exec_restatement_reason = Sbe.get_u8_opt b ~pos:(base + 199)
+    }
+  ;;
+end
+
+module Cancel_reject = struct
+  type t =
+    { seq_num : int
+    ; uuid : int
+    ; text : string
+    ; exec_id : string
+    ; sender_id : string
+    ; cl_ord_id : string
+    ; party_details_list_req_id : int
+    ; order_id : int
+    ; transact_time : int
+    ; sending_time : int
+    ; order_request_id : int
+    ; location : string
+    ; cxl_rej_reason : int
+    ; manual : bool
+    ; poss_retrans : bool
+    }
+  [@@deriving sexp, compare, equal]
+
+  let cancel_template_id = 535
+  let replace_template_id = 536
+  let block_length = 409
+
+  let write b ~base t =
+    Sbe.set_u32 b ~pos:base t.seq_num;
+    Sbe.set_u64 b ~pos:(base + 4) t.uuid;
+    Sbe.set_string b ~pos:(base + 12) ~len:256 t.text;
+    Sbe.set_string b ~pos:(base + 268) ~len:40 t.exec_id;
+    Sbe.set_string b ~pos:(base + 308) ~len:20 t.sender_id;
+    Sbe.set_string b ~pos:(base + 328) ~len:20 t.cl_ord_id;
+    Sbe.set_u64 b ~pos:(base + 348) t.party_details_list_req_id;
+    Sbe.set_u64 b ~pos:(base + 356) t.order_id;
+    Sbe.set_u64 b ~pos:(base + 364) t.transact_time;
+    Sbe.set_u64 b ~pos:(base + 372) t.sending_time;
+    Sbe.set_u64 b ~pos:(base + 380) t.order_request_id;
+    Sbe.set_string b ~pos:(base + 388) ~len:5 t.location;
+    Sbe.set_u16 b ~pos:(base + 393) t.cxl_rej_reason;
+    Sbe.set_u16_opt b ~pos:(base + 395) None;
+    Sbe.set_bool b ~pos:(base + 397) t.manual;
+    Sbe.set_bool b ~pos:(base + 398) t.poss_retrans;
+    nulls_u8 b ~base [ 399; 400 ];
+    null_u64 b ~pos:(base + 401)
+  ;;
+
+  let read b ~base =
+    { seq_num = Sbe.get_u32 b ~pos:base
+    ; uuid = Sbe.get_u64 b ~pos:(base + 4)
+    ; text = Sbe.get_string b ~pos:(base + 12) ~len:256
+    ; exec_id = Sbe.get_string b ~pos:(base + 268) ~len:40
+    ; sender_id = Sbe.get_string b ~pos:(base + 308) ~len:20
+    ; cl_ord_id = Sbe.get_string b ~pos:(base + 328) ~len:20
+    ; party_details_list_req_id = Sbe.get_u64 b ~pos:(base + 348)
+    ; order_id = Sbe.get_u64 b ~pos:(base + 356)
+    ; transact_time = Sbe.get_u64 b ~pos:(base + 364)
+    ; sending_time = Sbe.get_u64 b ~pos:(base + 372)
+    ; order_request_id = Sbe.get_u64 b ~pos:(base + 380)
+    ; location = Sbe.get_string b ~pos:(base + 388) ~len:5
+    ; cxl_rej_reason = Sbe.get_u16 b ~pos:(base + 393)
+    ; manual = Sbe.get_bool b ~pos:(base + 397)
+    ; poss_retrans = Sbe.get_bool b ~pos:(base + 398)
+    }
+  ;;
+end
+
 module Message = struct
   type t =
     | Negotiate of Negotiate.t
@@ -690,6 +1345,15 @@ module Message = struct
     | New_order_single of New_order_single.t
     | Order_cancel_replace_request of Order_cancel_replace_request.t
     | Order_cancel_request of Order_cancel_request.t
+    | Business_reject of Business_reject.t
+    | Execution_report_new of Execution_report_new.t
+    | Execution_report_reject of Execution_report_reject.t
+    | Execution_report_elimination of Execution_report_elimination.t
+    | Execution_report_trade_outright of Execution_report_trade_outright.t
+    | Execution_report_modify of Execution_report_modify.t
+    | Execution_report_cancel of Execution_report_cancel.t
+    | Order_cancel_reject of Cancel_reject.t
+    | Order_cancel_replace_reject of Cancel_reject.t
   [@@deriving sexp, compare, equal]
 
   let template_id = function
@@ -708,6 +1372,15 @@ module Message = struct
     | New_order_single _ -> New_order_single.template_id
     | Order_cancel_replace_request _ -> Order_cancel_replace_request.template_id
     | Order_cancel_request _ -> Order_cancel_request.template_id
+    | Business_reject _ -> Business_reject.template_id
+    | Execution_report_new _ -> Execution_report_new.template_id
+    | Execution_report_reject _ -> Execution_report_reject.template_id
+    | Execution_report_elimination _ -> Execution_report_elimination.template_id
+    | Execution_report_trade_outright _ -> Execution_report_trade_outright.template_id
+    | Execution_report_modify _ -> Execution_report_modify.template_id
+    | Execution_report_cancel _ -> Execution_report_cancel.template_id
+    | Order_cancel_reject _ -> Cancel_reject.cancel_template_id
+    | Order_cancel_replace_reject _ -> Cancel_reject.replace_template_id
   ;;
 
   let name = function
@@ -726,12 +1399,29 @@ module Message = struct
     | New_order_single _ -> "NewOrderSingle"
     | Order_cancel_replace_request _ -> "OrderCancelReplaceRequest"
     | Order_cancel_request _ -> "OrderCancelRequest"
+    | Business_reject _ -> "BusinessReject"
+    | Execution_report_new _ -> "ExecutionReportNew"
+    | Execution_report_reject _ -> "ExecutionReportReject"
+    | Execution_report_elimination _ -> "ExecutionReportElimination"
+    | Execution_report_trade_outright _ -> "ExecutionReportTradeOutright"
+    | Execution_report_modify _ -> "ExecutionReportModify"
+    | Execution_report_cancel _ -> "ExecutionReportCancel"
+    | Order_cancel_reject _ -> "OrderCancelReject"
+    | Order_cancel_replace_reject _ -> "OrderCancelReplaceReject"
   ;;
 
   let seq_num = function
     | New_order_single t -> Some t.seq_num
     | Order_cancel_replace_request t -> Some t.seq_num
     | Order_cancel_request t -> Some t.seq_num
+    | Business_reject t -> Some t.seq_num
+    | Execution_report_new t -> Some t.common.seq_num
+    | Execution_report_reject t -> Some t.common.seq_num
+    | Execution_report_elimination t -> Some t.common.seq_num
+    | Execution_report_trade_outright t -> Some t.common.seq_num
+    | Execution_report_modify t -> Some t.common.seq_num
+    | Execution_report_cancel t -> Some t.common.seq_num
+    | Order_cancel_reject t | Order_cancel_replace_reject t -> Some t.seq_num
     | Negotiate _
     | Negotiation_response _
     | Negotiation_reject _
@@ -744,6 +1434,37 @@ module Message = struct
     | Retransmission _
     | Retransmit_reject _
     | Not_applied _ -> None
+  ;;
+
+  let map_common t ~f =
+    match t with
+    | Execution_report_new r -> Execution_report_new { r with common = f r.common }
+    | Execution_report_reject r -> Execution_report_reject { r with common = f r.common }
+    | Execution_report_elimination r ->
+      Execution_report_elimination { r with common = f r.common }
+    | Execution_report_trade_outright r ->
+      Execution_report_trade_outright { r with common = f r.common }
+    | Execution_report_modify r -> Execution_report_modify { r with common = f r.common }
+    | Execution_report_cancel r -> Execution_report_cancel { r with common = f r.common }
+    | other -> other
+  ;;
+
+  let with_sequence t ~seq_num ~uuid =
+    match t with
+    | Business_reject r -> Business_reject { r with seq_num; uuid }
+    | Order_cancel_reject r -> Order_cancel_reject { r with seq_num; uuid }
+    | Order_cancel_replace_reject r ->
+      Order_cancel_replace_reject { r with seq_num; uuid }
+    | other -> map_common other ~f:(fun c -> { c with seq_num; uuid })
+  ;;
+
+  let as_retransmission t =
+    match t with
+    | Business_reject r -> Business_reject { r with poss_retrans = true }
+    | Order_cancel_reject r -> Order_cancel_reject { r with poss_retrans = true }
+    | Order_cancel_replace_reject r ->
+      Order_cancel_replace_reject { r with poss_retrans = true }
+    | other -> map_common other ~f:(fun c -> { c with poss_retrans = true })
   ;;
 end
 
@@ -846,6 +1567,52 @@ let encode (m : Message.t) =
       ~template_id:Order_cancel_request.template_id
       ~block_length:Order_cancel_request.block_length
       (fun b ~base -> Order_cancel_request.write b ~base t)
+  | Business_reject t ->
+    frame
+      ~template_id:Business_reject.template_id
+      ~block_length:Business_reject.block_length
+      (fun b ~base -> Business_reject.write b ~base t)
+  | Execution_report_new t ->
+    frame
+      ~template_id:Execution_report_new.template_id
+      ~block_length:Execution_report_new.block_length
+      (fun b ~base -> Execution_report_new.write b ~base t)
+  | Execution_report_reject t ->
+    frame
+      ~template_id:Execution_report_reject.template_id
+      ~block_length:Execution_report_reject.block_length
+      (fun b ~base -> Execution_report_reject.write b ~base t)
+  | Execution_report_elimination t ->
+    frame
+      ~template_id:Execution_report_elimination.template_id
+      ~block_length:Execution_report_elimination.block_length
+      (fun b ~base -> Execution_report_elimination.write b ~base t)
+  | Execution_report_trade_outright t ->
+    frame
+      ~template_id:Execution_report_trade_outright.template_id
+      ~block_length:Execution_report_trade_outright.block_length
+      ~extra:(Execution_report_trade_outright.extra t)
+      (fun b ~base -> Execution_report_trade_outright.write b ~base t)
+  | Execution_report_modify t ->
+    frame
+      ~template_id:Execution_report_modify.template_id
+      ~block_length:Execution_report_modify.block_length
+      (fun b ~base -> Execution_report_modify.write b ~base t)
+  | Execution_report_cancel t ->
+    frame
+      ~template_id:Execution_report_cancel.template_id
+      ~block_length:Execution_report_cancel.block_length
+      (fun b ~base -> Execution_report_cancel.write b ~base t)
+  | Order_cancel_reject t ->
+    frame
+      ~template_id:Cancel_reject.cancel_template_id
+      ~block_length:Cancel_reject.block_length
+      (fun b ~base -> Cancel_reject.write b ~base t)
+  | Order_cancel_replace_reject t ->
+    frame
+      ~template_id:Cancel_reject.replace_template_id
+      ~block_length:Cancel_reject.block_length
+      (fun b ~base -> Cancel_reject.write b ~base t)
 ;;
 
 let decode_exn b =
@@ -912,6 +1679,34 @@ let decode_exn b =
     | 516 ->
       need Order_cancel_request.block_length;
       Order_cancel_request (Order_cancel_request.read b ~base)
+    | 521 ->
+      need Business_reject.block_length;
+      Business_reject (Business_reject.read b ~base)
+    | 522 ->
+      need Execution_report_new.block_length;
+      Execution_report_new (Execution_report_new.read b ~base)
+    | 523 ->
+      need Execution_report_reject.block_length;
+      Execution_report_reject (Execution_report_reject.read b ~base)
+    | 524 ->
+      need Execution_report_elimination.block_length;
+      Execution_report_elimination (Execution_report_elimination.read b ~base)
+    | 525 ->
+      need Execution_report_trade_outright.block_length;
+      Execution_report_trade_outright
+        (Execution_report_trade_outright.read b ~base ~block_length:header.block_length)
+    | 531 ->
+      need Execution_report_modify.block_length;
+      Execution_report_modify (Execution_report_modify.read b ~base)
+    | 534 ->
+      need Execution_report_cancel.block_length;
+      Execution_report_cancel (Execution_report_cancel.read b ~base)
+    | 535 ->
+      need Cancel_reject.block_length;
+      Order_cancel_reject (Cancel_reject.read b ~base)
+    | 536 ->
+      need Cancel_reject.block_length;
+      Order_cancel_replace_reject (Cancel_reject.read b ~base)
     | id -> fail "unknown iLink 3 template %d" id
   in
   m
