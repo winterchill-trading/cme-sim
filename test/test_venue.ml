@@ -238,10 +238,9 @@ let%expect_test "phases: close expires day orders, pre-open queues, open release
   [%expect
     {|
       phase 1001 Open
-      book 1001
-    001/ALC Trade pre-buy 1 @ 6696 cum 1 leaves 1
-    002/BOB Trade pre-sell 1 @ 6696 cum 1 leaves 0 aggressor
-      trade 1001: 1 @ 6696 aggressor (Sell) orders 1
+    001/ALC Trade pre-buy 1 @ 6695 cum 1 leaves 1
+    002/BOB Trade pre-sell 1 @ 6695 cum 1 leaves 0
+      trade 1001: 1 @ 6695 aggressor () orders 2
       book 1001
     |}]
 ;;
@@ -259,5 +258,45 @@ let%expect_test "cancel on disconnect" =
       book 1001
     001/ALC Cancel b cum 0 reason 100
       book 1001
+    |}]
+;;
+
+let%expect_test "opening auction uncrosses at one price" =
+  let v = Venue.create () in
+  Venue.new_order
+    v
+    ~account:alice
+    (order Sell 2 ~price:"6698" ~tif:Gtc ~cl_ord_id:"gtc-ask");
+  Venue.set_phase v ~security_id:1001 Closed;
+  Venue.set_phase v ~security_id:1001 Pre_open;
+  ignore (Venue.drain v : Venue.Output.t list);
+  Venue.new_order v ~account:bob (order Buy 3 ~price:"6700" ~cl_ord_id:"b1");
+  Venue.new_order v ~account:bob (order Buy 1 ~price:"6697" ~cl_ord_id:"b2");
+  Venue.new_order v ~account:alice (order Sell 2 ~price:"6696" ~cl_ord_id:"s1");
+  Venue.new_order v ~account:alice (order Sell 1 ~price:"6699" ~cl_ord_id:"s2");
+  ignore (Venue.drain v : Venue.Output.t list);
+  Venue.set_phase v ~security_id:1001 Open;
+  show v;
+  [%expect
+    {|
+      phase 1001 Open
+    002/BOB Trade b1 3 @ 6698 cum 3 leaves 0
+    001/ALC Trade s1 2 @ 6698 cum 2 leaves 0
+    001/ALC Trade gtc-ask 1 @ 6698 cum 1 leaves 1
+      trade 1001: 3 @ 6698 aggressor () orders 3
+      book 1001
+      book 1001
+      book 1001
+    |}];
+  print_s [%sexp (Venue.orders v ~account:alice : Venue.Order_view.t list)];
+  print_s [%sexp (Venue.orders v ~account:bob : Venue.Order_view.t list)];
+  [%expect
+    {|
+    (((order_id 700000000001) (cl_ord_id gtc-ask) (security_id 1001) (side Sell)
+      (price 6698) (order_qty 2) (cum_qty 1) (display_qty ()) (queued false))
+     ((order_id 700000000005) (cl_ord_id s2) (security_id 1001) (side Sell)
+      (price 6699) (order_qty 1) (cum_qty 0) (display_qty ()) (queued false)))
+    (((order_id 700000000003) (cl_ord_id b2) (security_id 1001) (side Buy)
+      (price 6697) (order_qty 1) (cum_qty 0) (display_qty ()) (queued false)))
     |}]
 ;;
