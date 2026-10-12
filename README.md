@@ -221,3 +221,7 @@ server stopped, ports 4300-4302 free
 
 CI pins fixed-decimal, exchange-core, order-book, exchange-core-engine and equities-core
 from GitHub.
+
+CI installs the pinned siblings and the opam dependencies through the shared
+[ox-setup](https://github.com/winterchill-trading/infra/blob/main/docs/ci.md) action, which
+caches the built opam switch between runs.
