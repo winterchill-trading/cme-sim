@@ -38,7 +38,7 @@ let%expect_test "flag parsing" =
 
 let es = Option.value_exn (Products.find_symbol "ESZ6")
 let start = Time_ns.of_int_ns_since_epoch 1_800_000_000_000_000_000
-let at s = Time_ns.add start (Time_ns.Span.of_sec s)
+let since_start s = Time_ns.add start (Time_ns.Span.of_sec s)
 
 let%expect_test "targets: series followed in real time, fixed price with drift" =
   let t0 = Time_ns.of_int_ns_since_epoch 1_700_000_000_000_000_000 in
@@ -58,7 +58,7 @@ let%expect_test "targets: series followed in real time, fixed price with drift" 
       symbol
       secs
       (Option.value_map
-         (Anchoring.target anchoring p ~now:(at secs))
+         (Anchoring.target anchoring p ~now:(since_start secs))
          ~f:Price.to_string
          ~default:"-")
   in
@@ -79,3 +79,74 @@ let%expect_test "targets: series followed in real time, fixed price with drift" 
     GCZ6 +0s -
     |}]
 ;;
+
+module Scaled = struct
+  open! Async
+
+  let%expect_test "scaled: a recorded instrument's prices times a factor" =
+    let instrument = Market_data.Instrument.create Binance "BTCUSDT" in
+    let t0 = Time_ns.of_string_with_utc_offset "2026-10-09T08:00:00Z" in
+    let ms n = Time_ns.add t0 (Time_ns.Span.of_int_ms n) in
+    let level px sz =
+      { Market_data.L2_update.Level.price = Price.of_string px
+      ; size = Market_data.Size.of_string sz
+      }
+    in
+    let dir = "anchor-scaled-test" in
+    let writer = Market_data.Event_log.Writer.create ~dir () in
+    List.iter
+      ~f:(Market_data.Event_log.Writer.append writer)
+      [ Market_data.Event.L2
+          { instrument
+          ; exch_ts = ms 0
+          ; recv_ts = ms 0
+          ; kind = Snapshot
+          ; bids = [ level "100000" "1" ]
+          ; asks = [ level "100002" "1" ]
+          }
+      ; Market_data.Event.Trade
+          { instrument
+          ; exch_ts = ms 1000
+          ; recv_ts = ms 1000
+          ; price = Price.of_string "100010"
+          ; size = Market_data.Size.of_string "0.1"
+          ; side = Buy
+          ; trade_id = "1"
+          }
+      ; Market_data.Event.L2
+          { instrument
+          ; exch_ts = ms 2000
+          ; recv_ts = ms 2000
+          ; kind = Delta
+          ; bids = [ level "100020" "1" ]
+          ; asks = [ level "100002" "0"; level "100030" "2" ]
+          }
+      ];
+    let%bind () = Market_data.Event_log.Writer.close writer in
+    let date = Date.of_string "2026-10-09" in
+    let spec = ok_exn (Anchoring.Spec.scaled_of_string "binance:BTCUSDT=GCZ6,0.04") in
+    let%bind loaded = Anchoring.load spec in
+    print_s [%sexp (Result.is_error loaded : bool)];
+    let%bind product, target =
+      Anchoring.load ~norm:{ dir; from = date; to_ = date } spec >>| ok_exn
+    in
+    let anchoring = Anchoring.create ~start [ product, target ] in
+    List.iter [ 0.; 1.; 2.; 60. ] ~f:(fun secs ->
+      printf
+        "+%gs %s\n"
+        secs
+        (Option.value_map
+           (Anchoring.target anchoring product ~now:(since_start secs))
+           ~f:Price.to_string
+           ~default:"-"));
+    let%map _ = Unix.system (sprintf "rm -rf %s" dir) in
+    [%expect
+      {|
+      true
+      +0s 4000
+      +1s 4000.4
+      +2s 4001
+      +60s 4001
+      |}]
+  ;;
+end
