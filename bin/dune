@@ -1,0 +1,10 @@
+; The main module is [main] rather than [cme_sim] so that it does not clash with the
+; [cme_sim] library's wrapper module.
+
+(executable
+ (name main)
+ (public_name cme-sim)
+ (package cme-sim)
+ (libraries async cme-sim core core_unix.command_unix)
+ (preprocess
+  (pps ppx_jane)))
