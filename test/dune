@@ -4,6 +4,7 @@
   (flags
    (:standard -source-tree-root .)))
  (libraries
+  async
   core
   cme-sim
   cme-sim.wire
