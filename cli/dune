@@ -1,0 +1,13 @@
+(executable
+ (name main)
+ (public_name cme-sim-cli)
+ (package cme-sim)
+ (libraries
+  async
+  cme-sim
+  cme-sim.wire
+  core
+  core_unix.command_unix
+  exchange-core)
+ (preprocess
+  (pps ppx_jane)))
