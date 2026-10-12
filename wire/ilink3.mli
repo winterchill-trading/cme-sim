@@ -187,6 +187,73 @@ module Not_applied : sig
   [@@deriving sexp, compare, equal]
 end
 
+(** {2 Client requests} *)
+
+module New_order_single : sig
+  type t =
+    { price : Price.t option
+    ; order_qty : int
+    ; security_id : int
+    ; side : Side.t
+    ; seq_num : int
+    ; sender_id : string
+    ; cl_ord_id : string
+    ; party_details_list_req_id : int
+    ; order_request_id : int
+    ; sending_time : int
+    ; stop_px : Price.t option
+    ; location : string
+    ; min_qty : int option
+    ; display_qty : int option
+    ; ord_type : Ord_type.t
+    ; time_in_force : Time_in_force.t
+    ; manual : bool
+    }
+  [@@deriving sexp, compare, equal]
+end
+
+module Order_cancel_replace_request : sig
+  type t =
+    { price : Price.t option
+    ; order_qty : int
+    ; security_id : int
+    ; side : Side.t
+    ; seq_num : int
+    ; sender_id : string
+    ; cl_ord_id : string
+    ; party_details_list_req_id : int
+    ; order_id : int
+    ; stop_px : Price.t option
+    ; order_request_id : int
+    ; sending_time : int
+    ; location : string
+    ; min_qty : int option
+    ; display_qty : int option
+    ; ord_type : Ord_type.t
+    ; time_in_force : Time_in_force.t
+    ; manual : bool
+    ; ofm_override : bool
+    }
+  [@@deriving sexp, compare, equal]
+end
+
+module Order_cancel_request : sig
+  type t =
+    { order_id : int
+    ; party_details_list_req_id : int
+    ; manual : bool
+    ; seq_num : int
+    ; sender_id : string
+    ; cl_ord_id : string
+    ; order_request_id : int
+    ; sending_time : int
+    ; location : string
+    ; security_id : int
+    ; side : Side.t
+    }
+  [@@deriving sexp, compare, equal]
+end
+
 (** {2 Messages} *)
 
 module Message : sig
@@ -203,12 +270,18 @@ module Message : sig
     | Retransmission of Retransmission.t
     | Retransmit_reject of Retransmit_reject.t
     | Not_applied of Not_applied.t
+    | New_order_single of New_order_single.t
+    | Order_cancel_replace_request of Order_cancel_replace_request.t
+    | Order_cancel_request of Order_cancel_request.t
   [@@deriving sexp, compare, equal]
 
   val template_id : t -> int
 
   (** Template name without the id, e.g. ["NewOrderSingle"]. *)
   val name : t -> string
+
+  (** Business (application) messages carry a [SeqNum]; session messages do not. *)
+  val seq_num : t -> int option
 end
 
 (** The whole frame: SOFH, header, body. *)

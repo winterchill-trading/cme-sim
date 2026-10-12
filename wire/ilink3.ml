@@ -67,6 +67,27 @@ exception Decode_error of string
 
 let fail fmt = ksprintf (fun s -> raise (Decode_error s)) fmt
 
+let decode_side b ~pos =
+  let v = Sbe.get_u8 b ~pos in
+  match Side.of_int v with
+  | Some s -> s
+  | None -> fail "invalid Side %d" v
+;;
+
+let decode_ord_type b ~pos =
+  let c = Sbe.get_char b ~pos in
+  match Ord_type.of_char c with
+  | Some t -> t
+  | None -> fail "invalid OrdType %C" c
+;;
+
+let decode_tif b ~pos =
+  let v = Sbe.get_u8 b ~pos in
+  match Time_in_force.of_int v with
+  | Some t -> t
+  | None -> fail "invalid TimeInForce %d" v
+;;
+
 (* FaultToleranceIndicator, SplitMsg and similar optional enums this codec does not model. *)
 let set_null_u8 b ~pos = Sbe.set_u8_opt b ~pos None
 
@@ -452,8 +473,205 @@ module Not_applied = struct
     }
   ;;
 end
-(* @@REQUESTS@@ *)
-(* @@RESPONSES@@ *)
+
+module New_order_single = struct
+  type t =
+    { price : Price.t option
+    ; order_qty : int
+    ; security_id : int
+    ; side : Side.t
+    ; seq_num : int
+    ; sender_id : string
+    ; cl_ord_id : string
+    ; party_details_list_req_id : int
+    ; order_request_id : int
+    ; sending_time : int
+    ; stop_px : Price.t option
+    ; location : string
+    ; min_qty : int option
+    ; display_qty : int option
+    ; ord_type : Ord_type.t
+    ; time_in_force : Time_in_force.t
+    ; manual : bool
+    }
+  [@@deriving sexp, compare, equal]
+
+  let template_id = 514
+  let block_length = 116
+
+  let write b ~base t =
+    Sbe.set_price_opt b ~pos:base t.price;
+    Sbe.set_u32 b ~pos:(base + 8) t.order_qty;
+    Sbe.set_i32 b ~pos:(base + 12) t.security_id;
+    Sbe.set_u8 b ~pos:(base + 16) (Side.to_int t.side);
+    Sbe.set_u32 b ~pos:(base + 17) t.seq_num;
+    Sbe.set_string b ~pos:(base + 21) ~len:20 t.sender_id;
+    Sbe.set_string b ~pos:(base + 41) ~len:20 t.cl_ord_id;
+    Sbe.set_u64 b ~pos:(base + 61) t.party_details_list_req_id;
+    Sbe.set_u64 b ~pos:(base + 69) t.order_request_id;
+    Sbe.set_u64 b ~pos:(base + 77) t.sending_time;
+    Sbe.set_price_opt b ~pos:(base + 85) t.stop_px;
+    Sbe.set_string b ~pos:(base + 93) ~len:5 t.location;
+    Sbe.set_u32_opt b ~pos:(base + 98) t.min_qty;
+    Sbe.set_u32_opt b ~pos:(base + 102) t.display_qty;
+    Sbe.set_u16_opt b ~pos:(base + 106) None;
+    Sbe.set_char b ~pos:(base + 108) (Ord_type.to_char t.ord_type);
+    Sbe.set_u8 b ~pos:(base + 109) (Time_in_force.to_int t.time_in_force);
+    Sbe.set_bool b ~pos:(base + 110) t.manual;
+    (* ExecInst @111 empty set, ExecutionMode @112 charNULL *)
+    set_null_u8 b ~pos:(base + 113);
+    set_null_u8 b ~pos:(base + 114);
+    set_null_u8 b ~pos:(base + 115)
+  ;;
+
+  let read b ~base =
+    { price = Sbe.get_price_opt b ~pos:base
+    ; order_qty = Sbe.get_u32 b ~pos:(base + 8)
+    ; security_id = Sbe.get_i32 b ~pos:(base + 12)
+    ; side = decode_side b ~pos:(base + 16)
+    ; seq_num = Sbe.get_u32 b ~pos:(base + 17)
+    ; sender_id = Sbe.get_string b ~pos:(base + 21) ~len:20
+    ; cl_ord_id = Sbe.get_string b ~pos:(base + 41) ~len:20
+    ; party_details_list_req_id = Sbe.get_u64 b ~pos:(base + 61)
+    ; order_request_id = Sbe.get_u64 b ~pos:(base + 69)
+    ; sending_time = Sbe.get_u64 b ~pos:(base + 77)
+    ; stop_px = Sbe.get_price_opt b ~pos:(base + 85)
+    ; location = Sbe.get_string b ~pos:(base + 93) ~len:5
+    ; min_qty = Sbe.get_u32_opt b ~pos:(base + 98)
+    ; display_qty = Sbe.get_u32_opt b ~pos:(base + 102)
+    ; ord_type = decode_ord_type b ~pos:(base + 108)
+    ; time_in_force = decode_tif b ~pos:(base + 109)
+    ; manual = Sbe.get_bool b ~pos:(base + 110)
+    }
+  ;;
+end
+
+module Order_cancel_replace_request = struct
+  type t =
+    { price : Price.t option
+    ; order_qty : int
+    ; security_id : int
+    ; side : Side.t
+    ; seq_num : int
+    ; sender_id : string
+    ; cl_ord_id : string
+    ; party_details_list_req_id : int
+    ; order_id : int
+    ; stop_px : Price.t option
+    ; order_request_id : int
+    ; sending_time : int
+    ; location : string
+    ; min_qty : int option
+    ; display_qty : int option
+    ; ord_type : Ord_type.t
+    ; time_in_force : Time_in_force.t
+    ; manual : bool
+    ; ofm_override : bool
+    }
+  [@@deriving sexp, compare, equal]
+
+  let template_id = 515
+  let block_length = 125
+
+  let write b ~base t =
+    Sbe.set_price_opt b ~pos:base t.price;
+    Sbe.set_u32 b ~pos:(base + 8) t.order_qty;
+    Sbe.set_i32 b ~pos:(base + 12) t.security_id;
+    Sbe.set_u8 b ~pos:(base + 16) (Side.to_int t.side);
+    Sbe.set_u32 b ~pos:(base + 17) t.seq_num;
+    Sbe.set_string b ~pos:(base + 21) ~len:20 t.sender_id;
+    Sbe.set_string b ~pos:(base + 41) ~len:20 t.cl_ord_id;
+    Sbe.set_u64 b ~pos:(base + 61) t.party_details_list_req_id;
+    Sbe.set_u64 b ~pos:(base + 69) t.order_id;
+    Sbe.set_price_opt b ~pos:(base + 77) t.stop_px;
+    Sbe.set_u64 b ~pos:(base + 85) t.order_request_id;
+    Sbe.set_u64 b ~pos:(base + 93) t.sending_time;
+    Sbe.set_string b ~pos:(base + 101) ~len:5 t.location;
+    Sbe.set_u32_opt b ~pos:(base + 106) t.min_qty;
+    Sbe.set_u32_opt b ~pos:(base + 110) t.display_qty;
+    Sbe.set_u16_opt b ~pos:(base + 114) None;
+    Sbe.set_char b ~pos:(base + 116) (Ord_type.to_char t.ord_type);
+    Sbe.set_u8 b ~pos:(base + 117) (Time_in_force.to_int t.time_in_force);
+    Sbe.set_bool b ~pos:(base + 118) t.manual;
+    Sbe.set_bool b ~pos:(base + 119) t.ofm_override;
+    set_null_u8 b ~pos:(base + 122);
+    set_null_u8 b ~pos:(base + 123);
+    set_null_u8 b ~pos:(base + 124)
+  ;;
+
+  let read b ~base =
+    { price = Sbe.get_price_opt b ~pos:base
+    ; order_qty = Sbe.get_u32 b ~pos:(base + 8)
+    ; security_id = Sbe.get_i32 b ~pos:(base + 12)
+    ; side = decode_side b ~pos:(base + 16)
+    ; seq_num = Sbe.get_u32 b ~pos:(base + 17)
+    ; sender_id = Sbe.get_string b ~pos:(base + 21) ~len:20
+    ; cl_ord_id = Sbe.get_string b ~pos:(base + 41) ~len:20
+    ; party_details_list_req_id = Sbe.get_u64 b ~pos:(base + 61)
+    ; order_id = Sbe.get_u64 b ~pos:(base + 69)
+    ; stop_px = Sbe.get_price_opt b ~pos:(base + 77)
+    ; order_request_id = Sbe.get_u64 b ~pos:(base + 85)
+    ; sending_time = Sbe.get_u64 b ~pos:(base + 93)
+    ; location = Sbe.get_string b ~pos:(base + 101) ~len:5
+    ; min_qty = Sbe.get_u32_opt b ~pos:(base + 106)
+    ; display_qty = Sbe.get_u32_opt b ~pos:(base + 110)
+    ; ord_type = decode_ord_type b ~pos:(base + 116)
+    ; time_in_force = decode_tif b ~pos:(base + 117)
+    ; manual = Sbe.get_bool b ~pos:(base + 118)
+    ; ofm_override = Sbe.get_bool b ~pos:(base + 119)
+    }
+  ;;
+end
+
+module Order_cancel_request = struct
+  type t =
+    { order_id : int
+    ; party_details_list_req_id : int
+    ; manual : bool
+    ; seq_num : int
+    ; sender_id : string
+    ; cl_ord_id : string
+    ; order_request_id : int
+    ; sending_time : int
+    ; location : string
+    ; security_id : int
+    ; side : Side.t
+    }
+  [@@deriving sexp, compare, equal]
+
+  let template_id = 516
+  let block_length = 88
+
+  let write b ~base t =
+    Sbe.set_u64 b ~pos:base t.order_id;
+    Sbe.set_u64 b ~pos:(base + 8) t.party_details_list_req_id;
+    Sbe.set_bool b ~pos:(base + 16) t.manual;
+    Sbe.set_u32 b ~pos:(base + 17) t.seq_num;
+    Sbe.set_string b ~pos:(base + 21) ~len:20 t.sender_id;
+    Sbe.set_string b ~pos:(base + 41) ~len:20 t.cl_ord_id;
+    Sbe.set_u64 b ~pos:(base + 61) t.order_request_id;
+    Sbe.set_u64 b ~pos:(base + 69) t.sending_time;
+    Sbe.set_string b ~pos:(base + 77) ~len:5 t.location;
+    Sbe.set_i32 b ~pos:(base + 82) t.security_id;
+    Sbe.set_u8 b ~pos:(base + 86) (Side.to_int t.side);
+    set_null_u8 b ~pos:(base + 87)
+  ;;
+
+  let read b ~base =
+    { order_id = Sbe.get_u64 b ~pos:base
+    ; party_details_list_req_id = Sbe.get_u64 b ~pos:(base + 8)
+    ; manual = Sbe.get_bool b ~pos:(base + 16)
+    ; seq_num = Sbe.get_u32 b ~pos:(base + 17)
+    ; sender_id = Sbe.get_string b ~pos:(base + 21) ~len:20
+    ; cl_ord_id = Sbe.get_string b ~pos:(base + 41) ~len:20
+    ; order_request_id = Sbe.get_u64 b ~pos:(base + 61)
+    ; sending_time = Sbe.get_u64 b ~pos:(base + 69)
+    ; location = Sbe.get_string b ~pos:(base + 77) ~len:5
+    ; security_id = Sbe.get_i32 b ~pos:(base + 82)
+    ; side = decode_side b ~pos:(base + 86)
+    }
+  ;;
+end
 
 module Message = struct
   type t =
@@ -469,6 +687,9 @@ module Message = struct
     | Retransmission of Retransmission.t
     | Retransmit_reject of Retransmit_reject.t
     | Not_applied of Not_applied.t
+    | New_order_single of New_order_single.t
+    | Order_cancel_replace_request of Order_cancel_replace_request.t
+    | Order_cancel_request of Order_cancel_request.t
   [@@deriving sexp, compare, equal]
 
   let template_id = function
@@ -484,6 +705,9 @@ module Message = struct
     | Retransmission _ -> Retransmission.template_id
     | Retransmit_reject _ -> Retransmit_reject.template_id
     | Not_applied _ -> Not_applied.template_id
+    | New_order_single _ -> New_order_single.template_id
+    | Order_cancel_replace_request _ -> Order_cancel_replace_request.template_id
+    | Order_cancel_request _ -> Order_cancel_request.template_id
   ;;
 
   let name = function
@@ -499,6 +723,27 @@ module Message = struct
     | Retransmission _ -> "Retransmission"
     | Retransmit_reject _ -> "RetransmitReject"
     | Not_applied _ -> "NotApplied"
+    | New_order_single _ -> "NewOrderSingle"
+    | Order_cancel_replace_request _ -> "OrderCancelReplaceRequest"
+    | Order_cancel_request _ -> "OrderCancelRequest"
+  ;;
+
+  let seq_num = function
+    | New_order_single t -> Some t.seq_num
+    | Order_cancel_replace_request t -> Some t.seq_num
+    | Order_cancel_request t -> Some t.seq_num
+    | Negotiate _
+    | Negotiation_response _
+    | Negotiation_reject _
+    | Establish _
+    | Establishment_ack _
+    | Establishment_reject _
+    | Sequence _
+    | Terminate _
+    | Retransmit_request _
+    | Retransmission _
+    | Retransmit_reject _
+    | Not_applied _ -> None
   ;;
 end
 
@@ -586,6 +831,21 @@ let encode (m : Message.t) =
       ~template_id:Not_applied.template_id
       ~block_length:Not_applied.block_length
       (fun b ~base -> Not_applied.write b ~base t)
+  | New_order_single t ->
+    frame
+      ~template_id:New_order_single.template_id
+      ~block_length:New_order_single.block_length
+      (fun b ~base -> New_order_single.write b ~base t)
+  | Order_cancel_replace_request t ->
+    frame
+      ~template_id:Order_cancel_replace_request.template_id
+      ~block_length:Order_cancel_replace_request.block_length
+      (fun b ~base -> Order_cancel_replace_request.write b ~base t)
+  | Order_cancel_request t ->
+    frame
+      ~template_id:Order_cancel_request.template_id
+      ~block_length:Order_cancel_request.block_length
+      (fun b ~base -> Order_cancel_request.write b ~base t)
 ;;
 
 let decode_exn b =
@@ -643,7 +903,15 @@ let decode_exn b =
     | 513 ->
       need Not_applied.block_length;
       Not_applied (Not_applied.read b ~base)
-    (* @@DECODE@@ *)
+    | 514 ->
+      need New_order_single.block_length;
+      New_order_single (New_order_single.read b ~base)
+    | 515 ->
+      need Order_cancel_replace_request.block_length;
+      Order_cancel_replace_request (Order_cancel_replace_request.read b ~base)
+    | 516 ->
+      need Order_cancel_request.block_length;
+      Order_cancel_request (Order_cancel_request.read b ~base)
     | id -> fail "unknown iLink 3 template %d" id
   in
   m
