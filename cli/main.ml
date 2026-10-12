@@ -61,7 +61,8 @@ let tif_of_string s : Ilink3.Time_in_force.t =
   | "gtc" -> Gtc
   | "fak" | "ioc" -> Fak
   | "fok" -> Fok
-  | _ -> raise_s [%message "tif must be day, gtc, fak (ioc) or fok" s]
+  | "gtd" -> Gtd
+  | _ -> raise_s [%message "tif must be day, gtc, fak (ioc), fok or gtd" s]
 ;;
 
 let ord_type_of_string s : Ilink3.Ord_type.t =
@@ -143,7 +144,10 @@ let order_params =
   and qty = flag "-qty" (required int) ~doc:"N contracts"
   and price = flag "-price" (optional string) ~doc:"PRICE limit price"
   and tif =
-    flag "-tif" (optional_with_default "day" string) ~doc:"TIF day, gtc, fak or fok"
+    flag
+      "-tif"
+      (optional_with_default "day" string)
+      ~doc:"TIF day, gtc, fak, fok (gtd is rejected)"
   and ord_type =
     flag "-type" (optional_with_default "limit" string) ~doc:"TYPE limit or market"
   and display = flag "-display" (optional int) ~doc:"N iceberg display quantity"
