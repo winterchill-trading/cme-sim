@@ -16,6 +16,8 @@ module Config = struct
     ; feed_heartbeat : Time_ns.Span.t
     ; halt_duration : Time_ns.Span.t
     ; reopen_pre_open : Time_ns.Span.t
+    ; anchors : (Products.t * Anchoring.Target.t) list
+    ; anchor_half_life : Time_ns.Span.t
     }
   [@@deriving sexp_of]
 
@@ -28,6 +30,8 @@ module Config = struct
     ; feed_heartbeat = Time_ns.Span.of_sec 5.
     ; halt_duration = Time_ns.Span.of_sec 30.
     ; reopen_pre_open = Time_ns.Span.of_sec 5.
+    ; anchors = []
+    ; anchor_half_life = Time_ns.Span.of_sec 1.
     }
   ;;
 end
@@ -50,47 +54,60 @@ type t =
   ; start : Time_ns.t
   ; sims : (Products.t * Market_sim.t) list
   ; halts : Time_ns.t Int.Table.t (** product halted until *)
+  ; anchoring : Anchoring.t
   }
 
 let ns now = Time_ns.to_int_ns_since_epoch now
 
 let create (config : Config.t) =
   let venue = Venue.create () in
+  let start = Time_ns.now () in
+  let anchoring =
+    Anchoring.create ~half_life:config.anchor_half_life ~start config.anchors
+  in
+  (* Anchored products always get noise traders: they are the book's only liquidity. *)
   let noise_products =
-    match config.noise_symbols with
-    | [] -> Products.all
-    | symbols -> List.filter_map symbols ~f:Products.find_symbol
+    let noise =
+      if not config.noise
+      then []
+      else (
+        match config.noise_symbols with
+        | [] -> Products.all
+        | symbols -> List.filter_map symbols ~f:Products.find_symbol)
+    in
+    List.filter Products.all ~f:(fun p ->
+      Anchoring.is_anchored anchoring p
+      || List.exists noise ~f:(fun n -> n.security_id = p.security_id))
   in
   let sims =
-    if not config.noise
-    then []
-    else
-      List.mapi noise_products ~f:(fun i p ->
-        let symbol = Products.engine_symbol p in
-        ( p
-        , Market_sim.create
-            { Market_sim.Config.default with
-              seed = config.seed + i
-            ; symbols = [ symbol ]
-            ; initial_prices = [ symbol, p.reference_price ]
-            ; min_notional = 100.
-            ; max_notional = 500.
-            }
-            (Venue.exchange venue) ))
+    List.mapi noise_products ~f:(fun i p ->
+      let symbol = Products.engine_symbol p in
+      ( p
+      , Market_sim.create
+          { Market_sim.Config.default with
+            seed = config.seed + i
+          ; symbols = [ symbol ]
+          ; initial_prices = [ symbol, p.reference_price ]
+          ; min_notional = 100.
+          ; max_notional = 500.
+          }
+          (Venue.exchange venue) ))
   in
   { config
   ; venue
   ; feed = Feed.create venue
   ; registry = Session_handler.Registry.create ()
   ; live = Account.Table.create ()
-  ; start = Time_ns.now ()
+  ; start
   ; sims
   ; halts = Int.Table.create ()
+  ; anchoring
   }
 ;;
 
 let venue t = t.venue
 let feed t = t.feed
+let anchoring t = t.anchoring
 
 let send writer (m : Ilink3.Message.t) =
   if not (Writer.is_closed writer) then Frame_io.write writer (Ilink3.encode m)
@@ -191,8 +208,10 @@ let tick_clock t =
 ;;
 
 let tick_noise t =
+  let now = Time_ns.now () in
   with_venue t (fun venue ->
     List.iter t.sims ~f:(fun (p, sim) ->
+      Anchoring.step t.anchoring p sim ~venue ~now;
       match Venue.phase venue ~security_id:p.security_id with
       | Open -> Market_sim.tick sim
       | Pre_open | Halted | Closed -> ());
@@ -326,6 +345,33 @@ let instruments_json t =
          }))
 ;;
 
+let anchors_json t =
+  let now = Time_ns.now () in
+  let price px = `String (Exchange_core.Price.to_string px) in
+  let opt = Option.value_map ~default:`Null ~f:price in
+  `List
+    (List.filter_map Products.all ~f:(fun p ->
+       Option.map (Anchoring.stats t.anchoring p) ~f:(fun (s : Anchoring.Stats.t) ->
+         let security_id = p.security_id in
+         `Assoc
+           [ "symbol", `String (Products.symbol p)
+           ; ( "phase"
+             , `String
+                 (Sexp.to_string
+                    [%sexp (Venue.phase t.venue ~security_id : Venue.Phase.t)]) )
+           ; "target", opt (Anchoring.target t.anchoring p ~now)
+           ; ( "mark"
+             , opt (Exchange.mark (Venue.exchange t.venue) (Products.engine_symbol p)) )
+           ; "last", price (Venue.last_price t.venue ~security_id)
+           ; ( "limits"
+             , let low, high = Venue.price_limits t.venue ~security_id in
+               `List [ price low; price high ] )
+           ; "pulls", `Int s.pulls
+           ; "waits", `Int s.waits
+           ; "restarts", `Int s.restarts
+           ])))
+;;
+
 let handle_http t ~body:_ _addr req =
   let uri = Cohttp.Request.uri req in
   match Uri.path uri with
@@ -346,6 +392,7 @@ let handle_http t ~body:_ _addr req =
            ( Http.Response.make ~status:`Switching_protocols ~headers ()
            , fun reader writer -> handle_ws t reader writer )))
   | "/" | "/instruments" -> respond (instruments_json t)
+  | "/anchors" -> respond (anchors_json t)
   | "/admin/halt" ->
     let symbol =
       Uri.get_query_param uri "symbol" |> Option.bind ~f:Products.find_symbol
