@@ -7,8 +7,9 @@ own SBE code), send orders, watch the feed.
 
 There is no real-time real data behind it. CME market data is licensed and nothing is
 replayed here: the book is driven by noise traders from
-[exchange-core](https://github.com/winterchill-trading/exchange-core) (`-noise`), and
-later by a price anchor. Prices, volumes and depth are synthetic.
+[exchange-core](https://github.com/winterchill-trading/exchange-core) (`-noise`), optionally
+pulled towards a reference price by the price anchor (`-anchor-*`, see
+[Price anchor](#price-anchor)). Prices, volumes and depth are synthetic.
 
 Instruments (December 2026 contracts; ticks and multipliers from
 [equities-core](https://github.com/winterchill-trading/equities-core)):
@@ -42,7 +43,9 @@ curl -s 'localhost:4302/admin/halt?symbol=GCZ6&seconds=10'
 
 Server flags: `-gateway-port`, `-feed-port`, `-http-port`, `-noise`,
 `-symbols ESZ6,CLZ6` (what the noise traders trade), `-clock real|accelerated|always-open`,
-`-seed`, `-no-cancel-on-disconnect`, `-log-level`.
+`-seed`, `-no-cancel-on-disconnect`, `-log-level`, and the anchor flags
+`-anchor-series`, `-anchor-fixed`, `-anchor-scaled`, `-anchor-norm`, `-anchor-from`,
+`-anchor-to`, `-anchor-half-life-ms`.
 
 CLI commands: `logon`, `order` (`-symbol -side -qty [-price] [-tif day|gtc|fak|fok]
 [-type limit|market] [-display N] [-min-qty N] [-wait S]`), `cancel -id`, `session`
@@ -60,7 +63,7 @@ everything.
 | --- | --- | --- |
 | gateway (4300) | iLink 3, schema id 8, version 5 | SOFH (`MessageSize u16`, `0xCAFE`) + SBE header + body |
 | feed (4301) | MDP 3.0, schema id 1, version 13 | SOFH + packet (`MsgSeqNum u32`, `SendingTime u64`, one message) |
-| http (4302) | `/ws` websocket: the same feed as JSON, one object per MDP message; `/` instrument list; `/admin/halt?symbol=S&seconds=N` | HTTP/1.1 |
+| http (4302) | `/ws` websocket: the same feed as JSON, one object per MDP message; `/` instrument list; `/anchors` anchor state; `/admin/halt?symbol=S&seconds=N` | HTTP/1.1 |
 
 The MDP feed is the multicast packet format carried over one TCP stream; the SOFH in
 front of each packet is the simulator's way to split the stream (CME's own TCP recovery
@@ -131,9 +134,66 @@ error codes and texts are not reproduced.
 At each close the noise traders' orders are pulled, day orders expire and a settlement is
 published; customer GTC orders stay and take part in the next opening auction.
 
+## Price anchor
+
+There is no free real-time CME data, so nothing is shadowed or replayed: the noise
+traders stay the book's only liquidity, and the
+[price anchor](https://github.com/winterchill-trading/price-anchor) design's TradFi path
+makes their random walk mean-revert around a reference price
+(`Market_sim.set_reference ~half_life`; the gap halves every half-life, 1 s by default).
+
+```sh
+dune exec cme-sim -- -anchor-series es.txt=ESZ6                  # <time> <price> lines
+dune exec cme-sim -- -anchor-fixed 4100,50=GCZ6                  # 4100, +50 bps a day
+dune exec cme-sim -- -anchor-scaled binance:BTCUSDT=GCZ6,0.04 \
+  -anchor-norm data/norm -anchor-from 2026-10-09                 # a recorded instrument
+curl -s localhost:4302/anchors                                   # target, mark, stats
+```
+
+| Flag | Reference |
+| --- | --- |
+| `-anchor-series FILE=SYMBOL` | a file of `<time> <price>` lines (nanoseconds or ISO 8601 with a zone, `#` comments), read with price-anchor's `Source.of_series`; the first point is mapped to the server start and the series is followed in real time, holding the last point |
+| `-anchor-fixed PRICE[,DRIFT_BPS_PER_DAY]=SYMBOL` | a fixed price, compounded by the drift |
+| `-anchor-scaled VENUE:SYMBOL=SIMSYM,FACTOR` | trades, BBO mids and L2 book mids of a recorded instrument from normalized event logs (`-anchor-norm DIR -anchor-from DAY [-anchor-to DAY]`), times `FACTOR` |
+| `-anchor-half-life-ms MS` | mean reversion half-life (default 1000) |
+
+Each flag is repeatable, one product per flag; anchored products always get noise
+traders, with or without `-noise`. The reference is rounded to the product's tick.
+
+- Open: before each noise tick (100 ms) the walk is pulled towards the reference; the
+  mark follows on the tick.
+- Pre-open, limit halts, maintenance: the venue owns the price; the anchor neither pulls
+  nor ticks and counts `waits`. At the open the walk restarts from the venue's last price
+  (the opening auction's, if it traded) and is pulled back from there (`restarts`).
+- Daily price limits keep coming from the settlement, i.e. the simulator's own last trade,
+  which now follows the reference.
+- Shadow levels, trade replay and staleness do not apply: there is no depth or trade flow
+  behind the reference.
+
+`scripts/anchor-demo.sh` runs ESZ6 on a 6700 to 6900 series, GCZ6 on a fixed 4100 and
+halts ESZ6 on the way (excerpt):
+
+```
+== t=5s
+  ESZ6 Open           target     6800 mark  6766.25 last  6735.75 pulls  51 waits   0 restarts 0
+  GCZ6 Open           target     4100 mark   4097.6 last   4095.1 pulls  51 waits   0 restarts 0
+== halt ESZ6 for 3 s
+== t=10s
+  ESZ6 Pre_open       target     6900 mark  6766.25 last  6735.75 pulls  51 waits  50 restarts 0
+  GCZ6 Open           target     4100 mark     4100 last   4099.4 pulls 101 waits   0 restarts 0
+== t=14s
+  ESZ6 Open           target     6800 mark   6772.5 last   6755.5 pulls  63 waits  77 restarts 1
+  GCZ6 Open           target     4100 mark   4096.5 last   4098.4 pulls 140 waits   0 restarts 0
+```
+
+Not done: reading a recorded crypto series from raw minute files (`Raw_reader` plus a
+venue normalizer) would link a venue client and its network stack into the simulator, so
+`-anchor-scaled` reads normalized event logs instead (`market-recorder` writes both, and
+`rebuild-norm` turns raw files into event logs).
+
 ## Not simulated
 
-- Real prices, volumes or any CME data; the start prices are fixed.
+- Real prices, volumes or any CME data; the start prices are fixed unless anchored.
 - Spreads and implied prices, options, mass quotes, party details, RFQ, order status and
   mass action requests, stop orders, good till date.
 - MBOFD/MBOLD order-level books, the recovery and instrument multicast channels, the MDP
@@ -216,11 +276,12 @@ server stopped, ports 4300-4302 free
 - `wire/`: `cme-sim.wire`, the SBE codecs and the client-side MBP book.
 - `lib/`: `Products`, `Venue` (CME order semantics over `exchange-core-engine`),
   `Session_handler` (FIXP state machine), `Feed` (MDP publisher), `Json_feed`,
-  `Session_clock`, `Server`, `Ilink_client`, `Frame_io`.
-- `bin/`: the `cme-sim` server; `cli/`: `cme-sim-cli`; `scripts/e2e.sh`.
+  `Session_clock`, `Anchoring` (the price anchor), `Server`, `Ilink_client`, `Frame_io`.
+- `bin/`: the `cme-sim` server; `cli/`: `cme-sim-cli`; `scripts/e2e.sh`,
+  `scripts/anchor-demo.sh`.
 
-CI pins fixed-decimal, exchange-core, order-book, exchange-core-engine and equities-core
-from GitHub.
+CI pins fixed-decimal, exchange-core, order-book, exchange-core-engine, equities-core,
+parquet, market-data and price-anchor from GitHub.
 
 CI installs the pinned siblings and the opam dependencies through the shared
 [ox-setup](https://github.com/winterchill-trading/infra/blob/main/docs/ci.md) action, which
