@@ -141,6 +141,9 @@ traders stay the book's only liquidity, and the
 [price anchor](https://github.com/winterchill-trading/price-anchor) design's TradFi path
 makes their random walk mean-revert around a reference price
 (`Market_sim.set_reference ~half_life`; the gap halves every half-life, 1 s by default).
+`Anchoring` is a thin wrapper: one `Price_anchor.Anchor` per anchored product, pulled
+on the venue's clock through a `Price_anchor.Path` (`step_clock:false`, no shadow levels,
+no mark interval).
 
 ```sh
 dune exec cme-sim -- -anchor-series es.txt=ESZ6                  # <time> <price> lines
@@ -152,19 +155,25 @@ curl -s localhost:4302/anchors                                   # target, mark,
 
 | Flag | Reference |
 | --- | --- |
-| `-anchor-series FILE=SYMBOL` | a file of `<time> <price>` lines (nanoseconds or ISO 8601 with a zone, `#` comments), read with price-anchor's `Source.of_series`; the first point is mapped to the server start and the series is followed in real time, holding the last point |
-| `-anchor-fixed PRICE[,DRIFT_BPS_PER_DAY]=SYMBOL` | a fixed price, compounded by the drift |
-| `-anchor-scaled VENUE:SYMBOL=SIMSYM,FACTOR` | trades, BBO mids and L2 book mids of a recorded instrument from normalized event logs (`-anchor-norm DIR -anchor-from DAY [-anchor-to DAY]`), times `FACTOR` |
+| `-anchor-series FILE=SYMBOL` | a file of `<time> <price>` lines (nanoseconds or ISO 8601 with a zone, `#` comments), read with price-anchor's `Source.of_series` and `Source.to_path`; the first point is mapped to the server start and the series is followed in real time, holding the last point |
+| `-anchor-fixed PRICE[,DRIFT_BPS_PER_DAY]=SYMBOL` | a fixed price, compounded by the drift (`Path.fixed`) |
+| `-anchor-scaled VENUE:SYMBOL=SIMSYM,FACTOR` | a recorded instrument from normalized event logs (`-anchor-norm DIR -anchor-from DAY [-anchor-to DAY]`) through `Source.to_path`: the reference book's mid (L2, or BBO), trades only while there is no book; times `FACTOR` (the anchor's `price_factor`) |
 | `-anchor-half-life-ms MS` | mean reversion half-life (default 1000) |
 
 Each flag is repeatable, one product per flag; anchored products always get noise
-traders, with or without `-noise`. The reference is rounded to the product's tick.
+traders, with or without `-noise`, and keep their own noise trader count. The reference
+is rounded to the product's tick.
 
 - Open: before each noise tick (100 ms) the walk is pulled towards the reference; the
-  mark follows on the tick.
-- Pre-open, limit halts, maintenance: the venue owns the price; the anchor neither pulls
-  nor ticks and counts `waits`. At the open the walk restarts from the venue's last price
-  (the opening auction's, if it traded) and is pulled back from there (`restarts`).
+  mark follows on the tick. `pulls` counts reference changes passed to the walk, not
+  every tick (a fixed price is pulled once per opening).
+- Daily price limits: the target is kept 30 bps inside the product's limits
+  (`Clamp.within_bands` on `Venue.price_limits`), so the anchor alone never walks the
+  product into a limit halt; `clamped` counts the pulls the limits moved.
+- Pre-open, limit halts, maintenance: the venue owns the price; the anchor hands the
+  symbol back to the free walk (which does not tick outside the open) and counts
+  `waits`. At the open the walk restarts from the venue's last price (the opening
+  auction's, if it traded) and is pulled back from there (`restarts`).
 - Daily price limits keep coming from the settlement, i.e. the simulator's own last trade,
   which now follows the reference.
 - Shadow levels, trade replay and staleness do not apply: there is no depth or trade flow
@@ -175,15 +184,15 @@ halts ESZ6 on the way (excerpt):
 
 ```
 == t=5s
-  ESZ6 Open           target     6800 mark  6766.25 last  6735.75 pulls  51 waits   0 restarts 0
-  GCZ6 Open           target     4100 mark   4097.6 last   4095.1 pulls  51 waits   0 restarts 0
+  ESZ6 Open           target     6800 mark   6763.5 last     6742 pulls   6 waits   0 restarts 0 clamped 0
+  GCZ6 Open           target     4100 mark   4097.6 last   4095.1 pulls   1 waits   0 restarts 0 clamped 0
 == halt ESZ6 for 3 s
 == t=10s
-  ESZ6 Pre_open       target     6900 mark  6766.25 last  6735.75 pulls  51 waits  50 restarts 0
-  GCZ6 Open           target     4100 mark     4100 last   4099.4 pulls 101 waits   0 restarts 0
+  ESZ6 Pre_open       target     6900 mark  6765.75 last  6747.75 pulls   6 waits  50 restarts 0 clamped 0
+  GCZ6 Open           target     4100 mark   4100.3 last   4099.4 pulls   1 waits   0 restarts 0 clamped 0
 == t=14s
-  ESZ6 Open           target     6800 mark   6772.5 last   6755.5 pulls  63 waits  77 restarts 1
-  GCZ6 Open           target     4100 mark   4096.5 last   4098.4 pulls 140 waits   0 restarts 0
+  ESZ6 Open           target     6800 mark     6774 last   6761.5 pulls   7 waits  78 restarts 1 clamped 0
+  GCZ6 Open           target     4100 mark   4099.2 last   4098.4 pulls   1 waits   0 restarts 0 clamped 0
 ```
 
 Not done: reading a recorded crypto series from raw minute files (`Raw_reader` plus a
