@@ -10,7 +10,9 @@ let command =
        session layer) on the gateway port; market data is MDP 3.0 packets, each prefixed \
        with a SOFH, on the feed port; the HTTP port serves the same feed as JSON on the \
        /ws websocket, the instrument list on / and /admin/halt?symbol=S. There is no \
-       real data behind the book: with -noise, simulated traders keep it moving.")
+       real data behind the book: with -noise, simulated traders keep it moving; the \
+       -anchor-* flags pull a product's noise towards a reference price while it is \
+       open.")
     (let%map_open.Command gateway_port =
        flag
          "-gateway-port"
@@ -45,6 +47,37 @@ let command =
          "-no-cancel-on-disconnect"
          no_arg
          ~doc:" keep a session's orders when its connection drops"
+     and series =
+       flag
+         "-anchor-series"
+         (listed (Anchoring.Spec.arg_type Anchoring.Spec.series_of_string))
+         ~doc:"FILE=SYMBOL pull SYMBOL towards a series of <time> <price> lines"
+     and fixed =
+       flag
+         "-anchor-fixed"
+         (listed (Anchoring.Spec.arg_type Anchoring.Spec.fixed_of_string))
+         ~doc:"PRICE[,DRIFT_BPS_PER_DAY]=SYMBOL pull SYMBOL towards a fixed price"
+     and scaled =
+       flag
+         "-anchor-scaled"
+         (listed (Anchoring.Spec.arg_type Anchoring.Spec.scaled_of_string))
+         ~doc:
+           "VENUE:SYMBOL=SIMSYM,FACTOR pull SIMSYM towards a recorded instrument's \
+            prices times FACTOR (needs -anchor-norm)"
+     and norm_dir =
+       flag
+         "-anchor-norm"
+         (optional string)
+         ~doc:"DIR normalized event logs for -anchor-scaled"
+     and norm_from =
+       flag "-anchor-from" (optional date) ~doc:"DATE first UTC day of -anchor-norm"
+     and norm_to =
+       flag "-anchor-to" (optional date) ~doc:"DATE last UTC day (default -anchor-from)"
+     and half_life_ms =
+       flag
+         "-anchor-half-life-ms"
+         (optional_with_default 1000. float)
+         ~doc:"MS mean reversion half-life of anchored prices (default 1000)"
      and log_level =
        flag
          "-log-level"
@@ -54,6 +87,31 @@ let command =
      fun () ->
        Log.Global.set_output [ Log.Output.stderr () ];
        Log.Global.set_level log_level;
+       let norm =
+         match norm_dir, norm_from with
+         | Some dir, Some from ->
+           Some
+             { Anchoring.Norm_range.dir; from; to_ = Option.value norm_to ~default:from }
+         | Some _, None -> failwith "-anchor-norm needs -anchor-from"
+         | None, _ -> None
+       in
+       if Float.( <= ) half_life_ms 0.
+       then failwith "-anchor-half-life-ms must be positive";
+       let%bind anchors =
+         Deferred.Or_error.List.map
+           ~how:`Sequential
+           (series @ fixed @ scaled)
+           ~f:(Anchoring.load ?norm)
+         >>| ok_exn
+       in
+       List.iter anchors ~f:(fun (p, target) ->
+         Log.Global.info_s
+           [%message
+             "anchor"
+               ~symbol:(Products.symbol p : string)
+               ~start:
+                 (Anchoring.Target.price_at target ~elapsed:Time_ns.Span.zero
+                  : Exchange_core.Price.t option)]);
        let config : Server.Config.t =
          { Server.Config.default with
            clock
@@ -61,6 +119,8 @@ let command =
          ; noise_symbols = Option.value symbols ~default:[]
          ; seed
          ; cancel_on_disconnect = not keep_orders
+         ; anchors
+         ; anchor_half_life = Time_ns.Span.of_ms half_life_ms
          }
        in
        let server = Server.create config in
