@@ -2,13 +2,19 @@
  (name cme_sim)
  (public_name cme-sim)
  (libraries
+  async
+  async_websocket
+  cohttp
+  cohttp-async
   core
   cme-sim.wire
   equities-core
   exchange-core
   exchange-core-engine
   fixed-decimal
+  http
   order-book
+  uri
   yojson)
  (preprocess
   (pps ppx_jane)))
