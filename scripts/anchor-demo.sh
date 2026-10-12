@@ -54,7 +54,7 @@ show() {
 import json, sys
 for a in json.load(sys.stdin):
     print("  {symbol} {phase:<14} target {target:>8} mark {mark:>8} last {last:>8} "
-          "pulls {pulls:>3} waits {waits:>3} restarts {restarts}".format(
+          "pulls {pulls:>3} waits {waits:>3} restarts {restarts} clamped {clamped}".format(
               **{k: ("-" if v is None else v) for k, v in a.items()}))'
 }
 
