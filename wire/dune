@@ -1,0 +1,6 @@
+(library
+ (name cme_sim_wire)
+ (public_name cme-sim.wire)
+ (libraries core exchange-core fixed-decimal)
+ (preprocess
+  (pps ppx_jane)))
